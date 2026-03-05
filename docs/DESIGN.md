@@ -6,6 +6,7 @@
 * Accepts a query -> returns a report grounded in web search results
 * Should use search APIs to gather context for the report
 * Encouraged to use LangSmith Studio to visualize the agent graph
+* Should have a messages field in state (users will input their request, and the final report should be passed as an assistant messages)
 
 Use: Tavily, Exa, SerpAPI or others
 
@@ -59,6 +60,18 @@ Use: Tavily, Exa, SerpAPI or others
 
 Since all approaches use the question refinement/detailed brief approach, we will as well. It makes sense since user's queries are usually vague. It will also allow the user to adjust the proposed research brief if it disagress with some parts, or there was a misunderstanding.
 
+We will also use the supervisor + sub-agent architecture, with parellelized sub-agents. The major deviation and addition from Open Deep Research is the use of a dedicated to-do list tool that the supervisor manages (will also possibly have the sub-agents use this as well). I also plan to use 2 different search APIs. Tavily for broader searcher, and then Exa for more precise searches or to find possible gaps that the worker might have missed. I'll have to decide a strategy for when to use which API.
+
+As of right now, I also want to utilize a virtual file system to store intermediate search results/findings (ie raw content), then we can simply use an LLM/Tool call to summarize that content and return it back to the supervisor. This will help with context bloat.
+
+The major consideration that I need to figure out is how a worker decides when it is done researching its assigned sub-topic. Is it when it stops finding new information that contributes to it's understanding? Or maybe that's up to the supervisor to decide once the worker returns its findings.
+
+I also want the supervisor and workers to be able to dynamically adjust the research brief as needed when it finds new information that might be relevant to the research brief.
+
+For the supervisor, I will use a more powerful model and workers will use a cheaper model. This is because the supervisor will be doing more reasoning and planning, while the workers will be doing more information gathering.
+
+I am also planning on making everything configureable (e.g. search depth, model, etc.)
+
 User -> Question Refinement/Brief Generation -> Supervisor + Sub-agent loop -> Report Generation
 
 ```mermaid
@@ -76,10 +89,18 @@ graph LR
 ##### Tavily
 
 * Optimized for LLMs
-* summarizes information from multiple sources
-* allows us to control search depth, number of results, etc
+* Summarizes information from multiple sources
+* Allows us to control search depth, number of results, etc
+* Good for quick, broad searches that performs the function of RAG essentially
 
 <https://docs.langchain.com/oss/python/integrations/tools/tavily_search>
+
+##### Exa
+
+* uses a "neural" embedding search engine, essentially just tries to understand the query and find relevant results, even w/o keyword matches
+* high token effiency bc it grabs the most relevant parts of a web page
+
+<https://docs.langchain.com/oss/python/integrations/tools/exa_search>
 
 #### Process Managment
 
@@ -91,5 +112,6 @@ graph LR
 
 * The state context for sub-agents could become quite large
 * Could possibly actually right to files instead of storing everything in memory. This addes additional tools calls and maybe a bit of latency, but it would allow the sub-agents to store intermediate search results/findings (ie raw content), then we can simply use an LLM/Tool call to summarize that content and return it back to the supervisor.
+* Maybe we only use this for the supervisor, and the sub-agents just store their findings in their state (which will be passed to the supervisor)
 
 <https://docs.langchain.com/oss/python/integrations/tools/filesystem>
