@@ -173,3 +173,6 @@ static/
 # Python build artifacts
 *.egg-info/
 notebooks/
+
+# Local agent instructions
+AGENTS.md
