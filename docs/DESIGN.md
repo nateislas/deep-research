@@ -68,11 +68,23 @@ The major consideration that I need to figure out is how a worker decides when i
 
 I also want the supervisor and workers to be able to dynamically adjust the research brief as needed when it finds new information that might be relevant to the research brief.
 
-For the supervisor, I will use a more powerful model and workers will use a cheaper model. This is because the supervisor will be doing more reasoning and planning, while the workers will be doing more information gathering.
+Model Contenders:
+
+* gpt-4.1-mini (used by Open Deep Research)     input: $0.40, output: $1.60
+* gpt-4.1 (used by Open Deep Research)          input: $2.00, output: $8.00
+* gpt-5-mini                                    input: $0.25, output: $2.00
+* gpt-5-nano                                    input: $0.05, output: $0.40
+* gpt-4o-mini                                   input: $1.10, output: $4.40
+* gpt-4o-mini-deep-research                     input: $2.00, output: $8.00
+* gpt-3o-mini                                   input: $1.10, output: $4.40
+* gpt-1o-mini                                   input: $1.10, output: $4.40
+
+The models have advanced quite a bit since gpt-4.1. GPT-5-nano is better at reasoning (based on initial findings) and the cost is roughly comparable to gpt-4.1. We'll use reasoning_effort = "low" to descrease latency though.
+We can use gpt-1o-mini for the supervisor and gpt-5-nano for the workers. This is because the supervisor will be doing more reasoning and planning, while the workers will be doing more information gathering.
 
 I am also planning on making everything configureable (e.g. search depth, model, etc.)
 
-User -> Question Refinement/Brief Generation -> Supervisor + Sub-agent loop -> Report Generation
+User <-> Question Refinement/Brief Generation -> Supervisor + Sub-agent loop -> Report Generation
 
 ```mermaid
 graph LR
@@ -107,6 +119,8 @@ graph LR
 ##### To-Do List
 
 * Will probably want to use a to-do list tool that the supervisor manages, and maybe for the sub-agents as well, this could help the supervisor keep track of addressed comoponents of the research brief, especially if the research tasks is very complex
+* ~~will need to split this up in to write_todo, read_todo, and update_todo~~
+* Actually, it better to just have an update_todo tool (instead of write_todo, update_todo, read_todo) that takes the todo list and updates the entire thing. Makes it easier for the agent to decide on the tool.
 
 #### Virtual File System
 
@@ -115,3 +129,15 @@ graph LR
 * Maybe we only use this for the supervisor, and the sub-agents just store their findings in their state (which will be passed to the supervisor)
 
 <https://docs.langchain.com/oss/python/integrations/tools/filesystem>
+
+### Defining the Graph and States
+
+We need to keep track of:
+
+* Supervisor State
+* Sub-agent State
+* Possibly the brief state
+
+I essentially want to have a separate node for the brief generation process, which will then route to the supervisor once the user is satisfied with the brief.
+
+Instead of storing all information in the state, we're simply going to use a VFS, and store the paths to the files in the state. I think this is ideal because we don't have to feed in the entire state to the LLM, and it also could allow for extendability where multiple LLMs could collaborate on the same task.
