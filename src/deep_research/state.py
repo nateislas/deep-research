@@ -12,9 +12,8 @@ from langgraph.graph import add_messages
 from typing_extensions import TypedDict
 
 
-# Decided to use BaseModel b/c we need strict typing and validation, we also need
-# to describe to the LLM what is absolutely required in the state, such as the brief
-# also tool inspiration to add a "research_topic" as an attribute
+# Using TypedDict for state because it allows for flexible updates without 
+# requiring strict Pydantic validation at every node transition.
 # The GlobalState is the source of truth for the entire graph.
 class GlobalState(TypedDict):
     """The root state for the entire deep research process."""

@@ -17,13 +17,12 @@ from deep_research.state import GlobalState, SupervisorState, WorkerState
 # --- Nodes ---
 
 
-async def generate_brief(
-    state: GlobalState,
-) -> Command[Literal["supervisor", "__end__"]]:
+async def generate_brief(state: GlobalState) -> Command[Literal["supervisor", "__end__"]]:
     """Generate and refine the research brief.
 
     When approved, this node triggers the research phase by ensuring the supervisor
-    has access to the VFS paths for the brief and the todo list.
+    has access to the VFS paths for the brief and the todo list, and initializes
+    the supervisor's local context.
     """
     # TODO: Implement LLM logic for brief generation
     if state.get("brief_status") == "approved":
@@ -32,6 +31,8 @@ async def generate_brief(
             update={
                 "brief_path": state.get("brief_path"),
                 "todo_list_path": state.get("todo_list_path"),
+                "supervisor_messages": [],  # Explicitly initialize supervisor history
+                "active_tasks": [],  # Explicitly initialize task list
             },
         )
     return Command(goto=END)
@@ -45,6 +46,10 @@ async def supervisor(
     The supervisor acts as a manager that pulls context from the VFS as needed.
     """
     # TODO: Implement Supervisor reasoning logic (GPT-1o-mini?)
+    # TODO: Add exit check for when brief is fully addressed or max iterations reached
+    # if research_is_complete(state):
+    #     return Command(goto=END)
+
     return Command(goto="supervisor_tools")
 
 
@@ -52,7 +57,8 @@ async def supervisor_tools(state: SupervisorState) -> Command[Literal["superviso
     """Execute research tasks by invoking the researcher_subgraph in parallel."""
     # TODO: Implement logic to:
     # 1. Parse 'ConductResearch' tool calls from the supervisor
-    # 2. Call researcher_subgraph.ainvoke() for each task in parallel
+    # 2. Call researcher_subgraph.ainvoke() for each task in parallel.
+    #    This must build a full WorkerState (brief_path, worker_todo_list_path, researcher_messages).
     # 3. Save findings to VFS and update the supervisor state
     return Command(goto="supervisor")
 
@@ -77,6 +83,10 @@ supervisor_subgraph = supervisor_builder.compile()
 async def worker(state: WorkerState) -> Command[Literal["worker_tools", "__end__"]]:
     """Perform specialized research using search tools."""
     # TODO: Implement Worker search loop logic (GPT-5-nano?)
+    # TODO: Add exit check for when sub-topic is fully researched
+    # if task_completed(state):
+    #     return Command(goto=END)
+
     return Command(goto="worker_tools")
 
 
@@ -117,4 +127,4 @@ deep_research_builder.add_edge(START, "generate_brief")
 # But we still define the entry point with START.
 
 # Compile the graph
-deep_research_graph = deep_research_builder.compile(name="Deep Research Graph")
+graph = deep_research_builder.compile(name="Deep Research Graph")
