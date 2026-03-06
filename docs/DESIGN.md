@@ -134,10 +134,19 @@ graph LR
 
 We need to keep track of:
 
+* Global State
 * Supervisor State
 * Sub-agent State
-* Possibly the brief state
 
 I essentially want to have a separate node for the brief generation process, which will then route to the supervisor once the user is satisfied with the brief.
 
 Instead of storing all information in the state, we're simply going to use a VFS, and store the paths to the files in the state. I think this is ideal because we don't have to feed in the entire state to the LLM, and it also could allow for extendability where multiple LLMs could collaborate on the same task.
+
+ Combined question clarification and brief generation
+
+Essentially want clarification to be part of the brief generation process.After clarification we essentially still need to "clarify" with the user if this is what they're looking for. However, it might be more clean to use separate and distinct steps for this, but we'll test it out.
+
+After a lot of research (plus back and forth with Gemini), I decided to go with the approach of having supervisor/worker tool calls as **tool nodes**. I was convinced because:
+
+* allows for the separation of reasoning vs acting (ie if tool calls were directly in the node and it failed, we'd have to dissect whether the reasoning or the tool itself broke. With separate tool nodes, we can see failures easily and it makes debugging way cleaner).
+* allows the "thinking" state to be saved (ie if a tool crashes, we don't lose the LLM's plan and can just pick up exactly where we left off since the state was checkpointed after the reasoning node).

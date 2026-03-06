@@ -1,7 +1,7 @@
-"""This module defines the state schemas for the deep research agent's LangGraph.
+"""State schemas for the deep research agent's LangGraph.
 
-It contains TypedDict definitions for the different phases of the research process,
-including brief generation, supervisor coordination, and worker search loops.
+This module defines the TypedDict structures used for the parent graph,
+research supervisor, and specialized research workers.
 """
 
 import operator
@@ -12,20 +12,33 @@ from langgraph.graph import add_messages
 from typing_extensions import TypedDict
 
 
-class BriefState(TypedDict):
-    """State representing the initial research brief generation and approval process."""
+# Decided to use BaseModel b/c we need strict typing and validation, we also need
+# to describe to the LLM what is absolutely required in the state, such as the brief
+# also tool inspiration to add a "research_topic" as an attribute
+# The GlobalState is the source of truth for the entire graph.
+class GlobalState(TypedDict):
+    """The root state for the entire deep research process."""
 
-    # Using AnyMessage b/c it allows us to be more flexible with the messages
-    # add_messages is a "reducer" that appends new messages to the history.
+    # Core message history for user interaction
     messages: Annotated[list[AnyMessage], add_messages]
 
+    # Shared research context for subgraphs
+    # Including supervisor_messages here allows the parent to initialize the supervisor
+    supervisor_messages: Annotated[list[AnyMessage], add_messages]
+
+    # Brief generation status and outputs
+    research_topic: str
     brief: str
-
-    # Control the flow of the brief generation process, once marked approved, the brief generation process is complete
-    # Options: "pending", "approved", "rejected"
     brief_status: Literal["pending", "approved", "rejected"]
+    brief_path: str  # Path to the .md brief in VFS
 
-    brief_path: str
+    # Supervisor coordination
+    todo_list_path: str  # Path to the .json todo list in VFS
+    active_tasks: Annotated[list[str], operator.add]
+
+    # Final outputs
+    research_findings: list[str]
+    final_report: str
 
 
 # Don't need to use BaseModel here b/c we don't need strict typing and validation
