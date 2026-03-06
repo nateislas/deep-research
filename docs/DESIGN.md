@@ -150,3 +150,5 @@ After a lot of research (plus back and forth with Gemini), I decided to go with 
 
 * allows for the separation of reasoning vs acting (ie if tool calls were directly in the node and it failed, we'd have to dissect whether the reasoning or the tool itself broke. With separate tool nodes, we can see failures easily and it makes debugging way cleaner).
 * allows the "thinking" state to be saved (ie if a tool crashes, we don't lose the LLM's plan and can just pick up exactly where we left off since the state was checkpointed after the reasoning node).
+
+One thought that I do have is right now, the supervisor has to wait on all workers to return. The result is additional latency because the fastest running worker has to wait on the longest running worker. I would like to make the workers independent of eachother (i.e not blocking) by allowing them to return whenever they are finished. The main drawback of this approach is that there could be race conditions (2 workers report back at the same time). Another major drawback is that this might not be the most effient way to spawn workers to cover independent sub-topics.
