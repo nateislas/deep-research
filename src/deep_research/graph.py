@@ -11,31 +11,115 @@ from typing import Literal
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
-from deep_research.state import GlobalState, SupervisorState, WorkerState
+from langchain.chat_models import init_chat_model
+
+from deep_research.state import (
+    GlobalState,
+    SupervisorState,
+    WorkerState,
+    ResearchBrief,
+)
+
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+    filter_messages,
+    get_buffer_string,
+)
+
+from deep_research.prompts import RESEARCH_INTAKE_PROMPT
 
 
 # --- Nodes ---
 
 
-async def generate_brief(state: GlobalState) -> Command[Literal["supervisor", "__end__"]]:
-    """Generate and refine the research brief.
+async def research_intake(
+    state: GlobalState,
+) -> Command[Literal["supervisor", "__end__"]]:
+    """Handles the intake conversation and brief finalization."""
+    messages = state["messages"]
+    last_user_msg = ""
+    # Extract last user message content safely (handle lists for multimodal models)
+    for m in reversed(messages):
+        if isinstance(m, HumanMessage):
+            if isinstance(m.content, str):
+                last_user_msg = m.content.lower()
+            elif isinstance(m.content, list):
+                # Join text parts if it's a list (multimodal format)
+                last_user_msg = " ".join(
+                    [part["text"] for part in m.content if isinstance(part, dict) and part.get("type") == "text"]
+                ).lower()
+            break
 
-    When approved, this node triggers the research phase by ensuring the supervisor
-    has access to the VFS paths for the brief and the todo list, and initializes
-    the supervisor's local context.
-    """
-    # TODO: Implement LLM logic for brief generation
-    if state.get("brief_status") == "approved":
+    # 1. The brief is approved
+    if ("approve" in last_user_msg or "approved" in last_user_msg) and state.get(
+        "brief"
+    ):
+        # update the brief status to approved
+        updated_brief = state["brief"].model_copy(update={"brief_status": "approved"})
         return Command(
             goto="supervisor",
             update={
-                "brief_path": state.get("brief_path"),
-                "todo_list_path": state.get("todo_list_path"),
+                "brief": updated_brief,
+                "todo_list_path": "research/todo.json",
                 "supervisor_messages": [],  # Explicitly initialize supervisor history
                 "active_tasks": [],  # Explicitly initialize task list
             },
         )
-    return Command(goto=END)
+    # We need to clarify or propose a brief
+    # initialize the model and bind the ResearchBrief as a structured tool
+    model = init_chat_model(
+        model="gpt-5-nano", model_provider="openai", temperature=0.1
+    )
+
+    # want to use bind_tools instead of bind_structured_tool
+    # bind_structured_tool would require the model to respond with a ResearchBrief
+    llm_with_brief_tool = model.bind_tools([ResearchBrief])
+
+    # Prepend the system prompt to the history
+    system_message = SystemMessage(content=RESEARCH_INTAKE_PROMPT)
+    # Filter messages to avoid context overflow if conversation gets very long
+    history = [system_message] + messages
+    response = await llm_with_brief_tool.ainvoke(history)
+
+    # 3. Process the Output
+    # If the model called the ResearchBrief tool to propose a plan
+    if response.tool_calls:
+        brief_args = response.tool_calls[0]["args"].copy()
+        # Ensure we don't have duplicate status arguments
+        brief_args.pop("brief_status", None)
+
+        # create a new ResearchBrief object with status "proposed"
+        new_brief = ResearchBrief(**brief_args, brief_status="proposed")
+
+        # Extract the assistant's thinking/text if it exists, otherwise use a default
+        instruction = "I've drafted a research plan. Please review the objectives and scope below. Type **'Approve'** to start research, or let me know if you'd like to adjust it."
+
+        # If the LLM included text (thinking/rationale) in the response content,
+        # we keep it so the user sees the reasoning.
+        if (
+            response.content
+            and isinstance(response.content, str)
+            and len(response.content.strip()) > 0
+        ):
+            ui_message = AIMessage(content=f"{response.content}\n\n{instruction}")
+        else:
+            ui_message = AIMessage(content=instruction)
+
+        return Command(
+            update={
+                "messages": [
+                    response,  # Keep the tool call for history
+                    ui_message,  # Present the thinking + instruction
+                ],
+                "brief": new_brief,
+            }
+        )
+
+    # 4. Standard Text Response (Clarification Question)
+    return Command(update={"messages": [response]})
 
 
 async def supervisor(
@@ -118,11 +202,11 @@ async def generate_final_report(state: GlobalState) -> Command[Literal["__end__"
 
 deep_research_builder = StateGraph(GlobalState)
 
-deep_research_builder.add_node("generate_brief", generate_brief)
+deep_research_builder.add_node("research_intake", research_intake)
 deep_research_builder.add_node("supervisor", supervisor_subgraph)
 deep_research_builder.add_node("generate_final_report", generate_final_report)
 
-deep_research_builder.add_edge(START, "generate_brief")
+deep_research_builder.add_edge(START, "research_intake")
 # Note: If a node returns a Command with a 'goto', it overrides these edges.
 # But we still define the entry point with START.
 

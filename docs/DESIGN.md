@@ -152,3 +152,13 @@ After a lot of research (plus back and forth with Gemini), I decided to go with 
 * allows the "thinking" state to be saved (ie if a tool crashes, we don't lose the LLM's plan and can just pick up exactly where we left off since the state was checkpointed after the reasoning node).
 
 One thought that I do have is right now, the supervisor has to wait on all workers to return. The result is additional latency because the fastest running worker has to wait on the longest running worker. I would like to make the workers independent of eachother (i.e not blocking) by allowing them to return whenever they are finished. The main drawback of this approach is that there could be race conditions (2 workers report back at the same time). Another major drawback is that this might not be the most effient way to spawn workers to cover independent sub-topics.
+
+ToDo List tool:
+
+* At first I was just doing to rely on the VFS to manage the to-do list, but I think it's better to have a dedicated tool for this. Especially because we want the ability to keep track of what's been checked off/completed.
+* It might also be easier to track the supervisors thinking if we're able to see when and why the to-do list was updated.
+* Also, by defining a todo list schema, we can ensure that we maintain a consistent data structure for the to-do list.
+
+The Research Breif:
+
+* At first I was going to have the research brief stored in a file using the VFS, however, I think it's better to store the research breif in the state, since that is serving as our "north star". If I would have used the VFS, the supervisor would constantly have to check the file to reference it.
