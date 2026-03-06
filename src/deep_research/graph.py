@@ -6,6 +6,7 @@ supervision, and research tasks, and connecting them with appropriate routing.
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from langgraph.graph import END, START, StateGraph
@@ -54,18 +55,28 @@ async def research_intake(
             break
 
     # 1. The brief is approved
-    if ("approve" in last_user_msg or "approved" in last_user_msg) and state.get(
-        "brief"
-    ):
+    # Regex for whole-word positive phrases, avoiding simple substrings.
+    approval_pattern = re.compile(
+        r"\b(approve|approved|i approve|agree|yes|correct|looks good)\b"
+    )
+    # Basic negation check to ensure "don't approve" isn't caught.
+    negation_pattern = re.compile(r"\b(don't|dont|not|never|no|stop|reject)\b")
+
+    is_approved = bool(approval_pattern.search(last_user_msg)) and not bool(
+        negation_pattern.search(last_user_msg)
+    )
+
+    if is_approved and state.get("brief"):
         # update the brief status to approved
         updated_brief = state["brief"].model_copy(update={"brief_status": "approved"})
         return Command(
             goto="supervisor",
             update={
                 "brief": updated_brief,
-                "todo_list_path": "research/todo.json",
+                "todo_list_path": state.get("todo_list_path"),
                 "supervisor_messages": [],  # Explicitly initialize supervisor history
                 "active_tasks": [],  # Explicitly initialize task list
+                "iteration_count": 0,  # Initialize loop counter
             },
         )
     # We need to clarify or propose a brief
@@ -111,8 +122,7 @@ async def research_intake(
         return Command(
             update={
                 "messages": [
-                    response,  # Keep the tool call for history
-                    ui_message,  # Present the thinking + instruction
+                    ui_message,  # CodeRabbit: Do NOT persist the unresolved tool call 'response'
                 ],
                 "brief": new_brief,
             }
@@ -129,12 +139,27 @@ async def supervisor(
 
     The supervisor acts as a manager that pulls context from the VFS as needed.
     """
-    # TODO: Implement Supervisor reasoning logic (GPT-1o-mini?)
-    # TODO: Add exit check for when brief is fully addressed or max iterations reached
-    # if research_is_complete(state):
-    #     return Command(goto=END)
+    # Max iterations to prevent infinite loops (CodeRabbit suggestion)
+    MAX_ITERATIONS = 10
+    iter_count = state.get("iteration_count", 0)
 
-    return Command(goto="supervisor_tools")
+    if iter_count >= MAX_ITERATIONS:
+        return Command(
+            goto="__end__",
+            update={
+                "messages": [AIMessage(content="Maximum research iterations reached.")]
+            },
+        )
+
+    # TODO: Implement Supervisor reasoning logic (GPT-5-nano?)
+    # For now, it just loops once and stops
+    if iter_count > 0:
+        return Command(goto="__end__")
+
+    return Command(
+        goto="supervisor_tools",
+        update={"iteration_count": iter_count + 1},
+    )
 
 
 async def supervisor_tools(state: SupervisorState) -> Command[Literal["supervisor"]]:

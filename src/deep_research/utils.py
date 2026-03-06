@@ -7,6 +7,8 @@ from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 from langchain_core.tools import tool
 
+from pathlib import Path
+
 
 class TodoList(BaseModel):
     """The todo list for the research agent."""
@@ -15,16 +17,32 @@ class TodoList(BaseModel):
     completed_tasks: list[str] = Field(default_factory=list)
 
 
+# Constants for VFS management
+RESEARCH_ROOT = Path("/Users/nathanielislas/CursorProjects/deep-research/vfs")
+
+
 @tool
-def update_todo_list(todo_data: TodoList, todo_path: str):
+def update_todo_list(todo_data: TodoList, todo_path_str: str):
     """Updates the entire research todo list in the VFS.
     Use this to plan next steps or check off finished items.
     """
+    # Sanitize and resolve the path
+    target_path = Path(todo_path_str).resolve()
+    root_path = RESEARCH_ROOT.resolve()
 
-    # Logic to write todo_data.json() to todo_path
-    with open(todo_path, "w") as f:
-        f.write(todo_data.model_dump_json())
-    return "Todo list updated successfully."
+    # Security check: Ensure we are inside the RESEARCH_ROOT
+    if not str(target_path).startswith(str(root_path)):
+        # If it's a relative path, try joining with RESEARCH_ROOT
+        target_path = (RESEARCH_ROOT / todo_path_str).resolve()
+        if not str(target_path).startswith(str(root_path)):
+            raise ValueError(f"Path traversal attempt blocked: {todo_path_str}")
+
+    # Ensure parent directory exists
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(target_path, "w") as f:
+        f.write(todo_data.model_dump_json(indent=2))
+    return f"Todo list updated successfully at {target_path}."
 
 
 # --- File Management Tools ---

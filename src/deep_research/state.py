@@ -26,7 +26,9 @@ class ResearchBrief(BaseModel):
         description="The boundaries of the search. Define what is explicitly included and what is excluded (e.g., timeline, geography, or specific industries)."
     )
     sub_objectives: list[str] = Field(
-        description="A list of 5-15 granular, independent research questions. Each should be distinct enough to be handled by a separate sub-agent without overlapping with others."
+        description="A list of 5-15 granular, independent research questions. Each should be distinct enough to be handled by a separate sub-agent without overlapping with others.",
+        min_items=5,
+        max_items=15,
     )
 
     brief_status: Literal["pending", "approved", "proposed"] = Field(default="pending")
@@ -74,6 +76,9 @@ class SupervisorState(TypedDict):
 
     # Need this to track which workers are active
     active_tasks: Annotated[list[str], operator.add]
+
+    # Counter for research iterations to prevent infinite loops
+    iteration_count: int
 
 
 class WorkerState(TypedDict):
