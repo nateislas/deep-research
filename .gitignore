@@ -176,3 +176,6 @@ notebooks/
 
 # Local agent instructions
 AGENTS.md
+vfs/
+test_graph.py
+.coderabbit.yaml

@@ -162,3 +162,11 @@ ToDo List tool:
 The Research Breif:
 
 * At first I was going to have the research brief stored in a file using the VFS, however, I think it's better to store the research breif in the state, since that is serving as our "north star". If I would have used the VFS, the supervisor would constantly have to check the file to reference it.
+
+The ResearchBrief Prompt:
+
+* At first I had a prompt that tried to have the user give as many details as possible if the model felt the query was to ambiguous. This caused it to keep looping because it kept believing it did not have enough info
+* I changed the prompt to ask clarifiying questions, but also rely on some of it's internal knowledge of the world to infer what the user might mean and think about possible research avenues based on that internal knowledge.
+* This worked fairly well, and it generates very detailed research briefs. I think this is a good trade-off because the user could easily tell the model to change aspects about the brief if they felt the agent misunderstood their intent
+
+* Decided to essentially hardcode the todolist because we don't need the LLM to decide to create it and where to create it becasue we always need it in the same spot
