@@ -7,7 +7,6 @@ supervision, and research tasks, and connecting them with appropriate routing.
 from __future__ import annotations
 
 import asyncio
-import difflib
 import re
 from pathlib import Path
 from typing import Literal
@@ -19,16 +18,16 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
-from langchain_core.runnables import RunnableConfig
 
 from deep_research.prompts import (
     RESEARCH_INTAKE_PROMPT,
     SUPERVISOR_PROMPT,
 )
 from deep_research.state import (
-    AddSubTopic,  # Used to add subtopics to the brief
+    AddSubTopic,
     ConductResearch,
     GlobalState,
     ResearchBrief,
@@ -41,7 +40,7 @@ from deep_research.utils import (
     brief_to_prompt_vars,
     get_findings_summary,
     todo_to_string,
-    update_todo_list,
+    write_todo_list,
 )
 
 # Hard limit on supervisor iterations to prevent infinite research loops.
@@ -199,11 +198,11 @@ async def supervisor(
     todo_list_exists = todo_path is not None and Path(todo_path).exists()
 
     if todo_list_exists:
-        # Load the todo list so we can display it's status in the prompt
+        # Load the todo list so we can display its status in the prompt
         todo = TodoList.model_validate_json(Path(todo_path).read_text())
         todo_status_str = todo_to_string(todo)
     else:
-        # todo list does not exists and need to have the LLM create one
+        # todo list does not exist — need to have the LLM create one
         todo_status_str = (
             "No todo list created yet. You must create one using update_todo_list."
         )
@@ -228,8 +227,9 @@ async def supervisor(
         messages = state["supervisor_messages"]
 
     # First iteration and need to create the list and spawn workers
+    # The LLM sees update_todo_list as a tool schema, but we handle execution ourselves.
     if not todo_list_exists:
-        tools = [update_todo_list, ConductResearch, AddSubTopic]
+        tools = [TodoList, ConductResearch, AddSubTopic]
     else:
         tools = [ConductResearch, AddSubTopic]
 
@@ -255,12 +255,107 @@ async def supervisor(
         )
 
 
+# --- Supervisor Tools Helpers ---
+# These keep supervisor_tools() readable by extracting each responsibility.
+
+
+def _handle_todo_updates(
+    todo_update_calls: list[dict],
+    run_root: Path,
+    todo_path: str | None,
+) -> tuple[str | None, list[ToolMessage]]:
+    """Process update_todo_list tool calls: parse, write JSON, return messages.
+
+    Args:
+        todo_update_calls: List of tool call dicts with name == "TodoList".
+        run_root: Thread-scoped VFS root directory.
+        todo_path: Current todo_list_path from state (may be None on first call).
+
+    Returns:
+        Tuple of (updated_todo_path, list_of_ToolMessages).
+    """
+    messages: list[ToolMessage] = []
+    for tc in todo_update_calls:
+        todo_data = TodoList(**tc["args"])
+        actual_path = run_root / "todo_list.json"
+        write_todo_list(todo_data, actual_path)
+        todo_path = str(actual_path)
+        messages.append(
+            ToolMessage(
+                content=f"Todo list updated at {actual_path}.",
+                tool_call_id=tc["id"],
+            )
+        )
+    return todo_path, messages
+
+
+def _handle_subtopic_additions(
+    add_subtopic_calls: list[dict],
+    todo_path: str | None,
+) -> list[ToolMessage]:
+    """Append new sub-topics to the existing TodoList on disk.
+
+    Args:
+        add_subtopic_calls: List of tool call dicts with name == "AddSubTopic".
+        todo_path: Path to the current todo_list.json.
+
+    Returns:
+        List of ToolMessages confirming each addition.
+    """
+    messages: list[ToolMessage] = []
+    if not add_subtopic_calls or not todo_path or not Path(todo_path).exists():
+        return messages
+
+    todo = TodoList.model_validate_json(Path(todo_path).read_text())
+    for tc in add_subtopic_calls:
+        args = tc["args"]
+        todo.tasks.append(args["new_sub_topic"])
+        messages.append(
+            ToolMessage(
+                content=f"Added sub-topic: '{args['new_sub_topic']}' — Reason: {args['rationale']}",
+                tool_call_id=tc["id"],
+            )
+        )
+    Path(todo_path).write_text(todo.model_dump_json(indent=2))
+    return messages
+
+
+def _mark_tasks_completed(
+    capped_tasks: list[dict],
+    todo_path: str | None,
+) -> None:
+    """Mark completed worker tasks in the TodoList JSON.
+
+    Uses simple case-insensitive comparison. The LLM writes both the todo task
+    and the ConductResearch sub_topic in the same inference pass, so they are
+    nearly always identical.
+
+    Args:
+        capped_tasks: The ConductResearch tool calls that were actually dispatched.
+        todo_path: Path to the current todo_list.json.
+    """
+    if not capped_tasks or not todo_path or not Path(todo_path).exists():
+        return
+
+    todo = TodoList.model_validate_json(Path(todo_path).read_text())
+    for tc in capped_tasks:
+        completed = tc["args"]["sub_topic"].strip().lower()
+        for task in todo.tasks:
+            if task.strip().lower() == completed:
+                todo.tasks.remove(task)
+                todo.completed_tasks.append(task)
+                break  # One match per completed topic
+    Path(todo_path).write_text(todo.model_dump_json(indent=2))
+
+
+# --- Supervisor Tools Node ---
+
+
 async def supervisor_tools(
     state: SupervisorState,
     config: RunnableConfig,
 ) -> Command[Literal["supervisor"]]:
     """Execute research tasks by invoking the worker_subgraph in parallel."""
-
     # extract the tool calls from the LLM's last message
     last_ai_message = state["supervisor_messages"][-1]
     tool_calls = last_ai_message.tool_calls
@@ -270,67 +365,34 @@ async def supervisor_tools(
         tc for tc in tool_calls if tc["name"] == "ConductResearch"
     ]
     add_subtopic_calls = [tc for tc in tool_calls if tc["name"] == "AddSubTopic"]
-    todo_update_calls = [tc for tc in tool_calls if tc["name"] == "update_todo_list"]
-
-    tool_messages = []
+    todo_update_calls = [tc for tc in tool_calls if tc["name"] == "TodoList"]
 
     # Extract the thread-specific run root
     thread_id = config["configurable"].get("thread_id", "default")
     run_root = RESEARCH_ROOT / thread_id
 
-    # Track which VFS directories workers write to, so generate_final_report
-    # knows where to look. We start from whatever was accumulated in prior iterations.
+    # Track which VFS directories workers write to
     findings_paths = list(state.get("findings_paths") or [])
     todo_path = state.get("todo_list_path")
 
-    # Handle the update_todo_list calls
-    # This should be done first to handle the first iteration
-    for tc in todo_update_calls:
-        todo_data = TodoList(**tc["args"]["todo_data"])
-        actual_path = str(run_root / "todo_list.json")
-        run_root.mkdir(parents=True, exist_ok=True)
+    # 1. Handle TodoList updates (must be first for the initial iteration)
+    todo_path, todo_msgs = _handle_todo_updates(todo_update_calls, run_root, todo_path)
 
-        # write the file via the utility tool
-        result = update_todo_list.invoke(
-            {
-                "todo_data": todo_data,
-                "todo_path_str": actual_path,
-            }
-        )
+    # 2. Handle AddSubTopic calls
+    subtopic_msgs = _handle_subtopic_additions(add_subtopic_calls, todo_path)
 
-        todo_path = actual_path
-        tool_messages.append(ToolMessage(content=result, tool_call_id=tc["id"]))
-
-    # Handle AddSubTopic Calls
-    if add_subtopic_calls and todo_path and Path(todo_path).exists():
-        todo = TodoList.model_validate_json(Path(todo_path).read_text())
-        from deep_research.utils import Task
-        for tc in add_subtopic_calls:
-            args = tc["args"]
-            todo.tasks.append(
-                Task(id=args["task_id"], description=args["new_sub_topic"])
-            )
-            tool_messages.append(
-                ToolMessage(
-                    content=f"Added sub-topic ID: '{args['task_id']}' — Reason: {args['rationale']}",
-                    tool_call_id=tc["id"],
-                )
-            )
-        Path(todo_path).write_text(todo.model_dump_json(indent=2))
-
-    # Handle ConductResearch Calls
+    # 3. Dispatch workers
     # Limit to MAX_CONCURRENT_WORKERS; defer remaining calls to next round
     capped_tasks = conduct_research_calls[:MAX_CONCURRENT_WORKERS]
     deferred_tasks = conduct_research_calls[MAX_CONCURRENT_WORKERS:]
 
-    # First, set up the VFS directories for all capped tasks
+    # Set up VFS directories for capped tasks
     for tc in capped_tasks:
         vfs_dir = run_root / tc["args"]["output_dirname"]
         vfs_dir.mkdir(parents=True, exist_ok=True)
 
-    # build the list of awaitables
-    # call .ainvoke() directly like open-deep-research
-    research_tasks = [
+    # Build the list of awaitables — call .ainvoke() directly like open-deep-research
+    research_coroutines = [
         worker_subgraph.ainvoke(
             {
                 "brief": state["brief"],
@@ -356,14 +418,21 @@ async def supervisor_tools(
         for tc in capped_tasks
     ]
 
-    # run them all concurrently. gather() preserves the order!
-    results = await asyncio.gather(*research_tasks)
+    # Run them all concurrently. gather() preserves the order!
+    results = await asyncio.gather(*research_coroutines, return_exceptions=True)
 
-    # TODO: START HERE TOMORROW
-
-    # Process exactly like LangChain does: zip the results with the original calls
-    for tc, _worker_result in zip(capped_tasks, results):
+    # 4. Process results
+    worker_msgs: list[ToolMessage] = []
+    for tc, result in zip(capped_tasks, results):
         args = tc["args"]
+        if isinstance(result, Exception):
+            worker_msgs.append(
+                ToolMessage(
+                    content=f"Worker failed on '{args['sub_topic']}': {result!s}",
+                    tool_call_id=tc["id"],
+                )
+            )
+            continue
         vfs_dir = run_root / args["output_dirname"]
         summary_path = vfs_dir / "compressed_summary.md"
         if summary_path.exists():
@@ -375,48 +444,28 @@ async def supervisor_tools(
             content = (
                 f"Worker completed: '{args['sub_topic']}' — no summary file found."
             )
-        tool_messages.append(ToolMessage(content=content, tool_call_id=tc["id"]))
+        worker_msgs.append(ToolMessage(content=content, tool_call_id=tc["id"]))
         findings_paths.append(str(vfs_dir))
-    # Mark deferred tasks
-    for tc in deferred_tasks:
-        tool_messages.append(
-            ToolMessage(
-                content=f"Deferred: '{tc['args']['sub_topic']}' — worker limit reached, will dispatch next iteration.",
-                tool_call_id=tc["id"],
-            )
+
+    # 5. Deferred task messages
+    deferred_msgs = [
+        ToolMessage(
+            content=f"Deferred: '{tc['args']['sub_topic']}' — worker limit reached, will dispatch next iteration.",
+            tool_call_id=tc["id"],
         )
-    # -----------------------------------------------------------------
-    # Update TodoList
-    # -----------------------------------------------------------------
-    if capped_tasks and todo_path and Path(todo_path).exists():
-        todo = TodoList.model_validate_json(Path(todo_path).read_text())
-        # Create a normalized index of current tasks: {normalized_text: original_text}
-        task_index = {re.sub(r"[^\w\s]", "", t.lower()).strip(): t for t in todo.tasks}
+        for tc in deferred_tasks
+    ]
 
-        for tc in capped_tasks:
-            completed_topic = tc["args"]["sub_topic"]
-            normalized_completed = re.sub(
-                r"[^\w\s]", "", completed_topic.lower()
-            ).strip()
+    # 6. Mark completed tasks in the TodoList
+    _mark_tasks_completed(capped_tasks, todo_path)
 
-            # Try exact match first, then fuzzy match
-            if normalized_completed in task_index:
-                matched_task = task_index[normalized_completed]
-            else:
-                matches = difflib.get_close_matches(
-                    normalized_completed, list(task_index.keys()), n=1, cutoff=0.7
-                )
-                matched_task = task_index[matches[0]] if matches else None
+    # Combine all tool messages in order
+    all_tool_messages = todo_msgs + subtopic_msgs + worker_msgs + deferred_msgs
 
-            if matched_task and matched_task in todo.tasks:
-                todo.tasks.remove(matched_task)
-                todo.completed_tasks.append(matched_task)
-
-        Path(todo_path).write_text(todo.model_dump_json(indent=2))
     return Command(
         goto="supervisor",
         update={
-            "supervisor_messages": tool_messages,
+            "supervisor_messages": all_tool_messages,
             "findings_paths": findings_paths,
             "todo_list_path": todo_path,
         },
@@ -445,8 +494,8 @@ async def worker(
     config: RunnableConfig,
 ) -> Command[Literal["worker_tools", END]]:
     """Perform specialized research using search tools."""
-    # Temporarily returning END to avoid infinite loop before worker is implemented
-    return Command(goto=END)
+    # TODO: Implement the real worker logic (search + file writing)
+    raise NotImplementedError("worker node logic not implemented")
 
 
 async def worker_tools(

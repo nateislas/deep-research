@@ -118,10 +118,9 @@ class SupervisorState(TypedDict):
 
     brief: ResearchBrief
 
-    # TODO: Will need to figure out what we want this to look like
-    # Will it simply be rewriting the to-do list? Can we figure out a way to check items off?
-    # Will probably use a json
-    todo_list_path: str
+    # Path to the .json todo list in VFS.
+    # NotRequired because it's None on the first supervisor iteration before the LLM creates one.
+    todo_list_path: NotRequired[str]
 
     # Need this to track which workers are active
     active_tasks: Annotated[list[str], operator.add]

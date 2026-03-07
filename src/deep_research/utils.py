@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 from langchain_community.agent_toolkits import FileManagementToolkit
-from langchain_core.tools import BaseTool, tool
+from langchain_core.tools import BaseTool
 from langchain_exa import ExaSearchResults
 from pydantic import BaseModel, Field
 
@@ -23,45 +23,21 @@ class TodoList(BaseModel):
 RESEARCH_ROOT = Path(__file__).parent.parent.parent / "vfs"
 
 
-# --- Todo List Tool ---
+# --- Todo List Helpers ---
 
 
-@tool
-def update_todo_list(todo_data: TodoList, todo_path_str: str) -> str:
-    """Update the entire research todo list in the VFS.
+def write_todo_list(todo: TodoList, path: Path) -> None:
+    """Write a TodoList to disk as JSON.
 
-    Use this to plan next steps or check off finished items.
+    This is a plain helper called programmatically by supervisor_tools.
+    The caller is responsible for ensuring `path` is valid and inside the VFS.
 
     Args:
-        todo_data: The updated TodoList object.
-        todo_path_str: The path to the todo list file in the VFS.
-
-    Returns:
-        A confirmation message with the path to the updated file.
-
-    Raises:
-        ValueError: If the path is outside the RESEARCH_ROOT (path traversal attempt).
+        todo: The TodoList object to persist.
+        path: Absolute path to the JSON file (e.g., run_root / "todo_list.json").
     """
-    # Sanitize and resolve the path
-    target_path = Path(todo_path_str).resolve()
-    root_path = RESEARCH_ROOT.resolve()
-
-    # Security check: Ensure we are inside the RESEARCH_ROOT
-    try:
-        if not target_path.is_relative_to(root_path):
-            raise ValueError
-    except ValueError:
-        # If it's a relative path, try joining with RESEARCH_ROOT
-        target_path = (RESEARCH_ROOT / todo_path_str).resolve()
-        if not target_path.is_relative_to(root_path):
-            raise ValueError(f"Path traversal attempt blocked: {todo_path_str}")
-
-    # Ensure parent directory exists
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(target_path, "w") as f:
-        f.write(todo_data.model_dump_json(indent=2))
-    return f"Todo list updated successfully at {target_path}."
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(todo.model_dump_json(indent=2))
 
 
 # --- Worker File Management Tools ---
