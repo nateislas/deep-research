@@ -127,7 +127,7 @@ class SupervisorState(TypedDict):
     active_tasks: Annotated[list[str], operator.add]
 
     # Track VFS directories containing worker findings
-    findings_paths: Annotated[list[str], operator.add]
+    findings_paths: NotRequired[Annotated[list[str], operator.add]]
 
     # Counter for research iterations to prevent infinite loops
     iteration_count: int

@@ -47,10 +47,13 @@ def update_todo_list(todo_data: TodoList, todo_path_str: str) -> str:
     root_path = RESEARCH_ROOT.resolve()
 
     # Security check: Ensure we are inside the RESEARCH_ROOT
-    if not str(target_path).startswith(str(root_path)):
+    try:
+        if not target_path.is_relative_to(root_path):
+            raise ValueError
+    except ValueError:
         # If it's a relative path, try joining with RESEARCH_ROOT
         target_path = (RESEARCH_ROOT / todo_path_str).resolve()
-        if not str(target_path).startswith(str(root_path)):
+        if not target_path.is_relative_to(root_path):
             raise ValueError(f"Path traversal attempt blocked: {todo_path_str}")
 
     # Ensure parent directory exists

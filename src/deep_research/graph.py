@@ -6,6 +6,8 @@ supervision, and research tasks, and connecting them with appropriate routing.
 
 from __future__ import annotations
 
+import asyncio
+import difflib
 import re
 from pathlib import Path
 from typing import Literal
@@ -42,8 +44,6 @@ from deep_research.utils import (
     update_todo_list,
 )
 
-import asyncio
-
 # Hard limit on supervisor iterations to prevent infinite research loops.
 # If research isn't done in 10 rounds, something is wrong with the prompt or model.
 MAX_ITERATIONS = 10
@@ -58,7 +58,7 @@ MAX_CONCURRENT_WORKERS = 3
 async def research_intake(
     state: GlobalState,
     config: RunnableConfig,
-) -> Command[Literal["supervisor", "__end__"]]:
+) -> Command[Literal["supervisor", END]]:
     """Handle the intake conversation and brief finalization."""
     messages = state["messages"]
     last_user_msg = ""
@@ -106,10 +106,9 @@ async def research_intake(
     # We need to clarify or propose a brief
     # initialize the model and bind the ResearchBrief as a structured tool
     model = init_chat_model(
-        model="gpt-5-nano",
+        model="gpt-4o-mini",
         model_provider="openai",
         temperature=0.1,
-        reasoning_effort="low",
     )
 
     # want to use bind_tools instead of bind_structured_tool
@@ -162,7 +161,7 @@ async def research_intake(
 async def supervisor(
     state: SupervisorState,
     config: RunnableConfig,
-) -> Command[Literal["supervisor_tools", "__end__"]]:
+) -> Command[Literal["supervisor_tools", END]]:
     """Plan research strategy using tools to read the brief and todo list.
 
     The supervisor acts as a manager that pulls context from the VFS as needed.
@@ -173,7 +172,7 @@ async def supervisor(
     # If we've reached the max iterations, end the graph
     if iter_count >= MAX_ITERATIONS:
         return Command(
-            goto="__end__",
+            goto=END,
             update={
                 "supervisor_messages": [
                     AIMessage(
@@ -194,8 +193,8 @@ async def supervisor(
     # On the first iteration, we need to check if a todo list exists
     # If not we need to create one
     todo_path = state.get("todo_list_path")
-    
-    # If it's the first run, todo_path might be None. 
+
+    # If it's the first run, todo_path might be None.
     # Even if it exists from a previous run on this thread, we check disk.
     todo_list_exists = todo_path is not None and Path(todo_path).exists()
 
@@ -235,9 +234,7 @@ async def supervisor(
         tools = [ConductResearch, AddSubTopic]
 
     # invoke the LLM
-    model = init_chat_model(
-        model="gpt-4o-mini", model_provider="openai"
-    )
+    model = init_chat_model(model="gpt-4o-mini", model_provider="openai")
     llm_with_tools = model.bind_tools(tools)
     response = await llm_with_tools.ainvoke(messages)
 
@@ -253,7 +250,7 @@ async def supervisor(
     else:
         # No tool calls = LLM determined research is complete
         return Command(
-            goto="__end__",
+            goto=END,
             update={"supervisor_messages": [response]},
         )
 
@@ -262,9 +259,7 @@ async def supervisor_tools(
     state: SupervisorState,
     config: RunnableConfig,
 ) -> Command[Literal["supervisor"]]:
-    """
-    Execute research tasks by invoking the worker_subgraph in parallel.
-    """
+    """Execute research tasks by invoking the worker_subgraph in parallel."""
 
     # extract the tool calls from the LLM's last message
     last_ai_message = state["supervisor_messages"][-1]
@@ -309,20 +304,24 @@ async def supervisor_tools(
     # Handle AddSubTopic Calls
     if add_subtopic_calls and todo_path and Path(todo_path).exists():
         todo = TodoList.model_validate_json(Path(todo_path).read_text())
+        from deep_research.utils import Task
         for tc in add_subtopic_calls:
             args = tc["args"]
-            todo.tasks.append(args["new_sub_topic"])
+            todo.tasks.append(
+                Task(id=args["task_id"], description=args["new_sub_topic"])
+            )
             tool_messages.append(
                 ToolMessage(
-                    content=f"Added sub-topic: '{args['new_sub_topic']}' — Reason: {args['rationale']}",
+                    content=f"Added sub-topic ID: '{args['task_id']}' — Reason: {args['rationale']}",
                     tool_call_id=tc["id"],
                 )
             )
         Path(todo_path).write_text(todo.model_dump_json(indent=2))
 
     # Handle ConductResearch Calls
+    # Limit to MAX_CONCURRENT_WORKERS; defer remaining calls to next round
     capped_tasks = conduct_research_calls[:MAX_CONCURRENT_WORKERS]
-    deferred_tasks = conduct_research_calls[MAX_CONCURRENT_WORKERS:]  # TODO: WHY
+    deferred_tasks = conduct_research_calls[MAX_CONCURRENT_WORKERS:]
 
     # First, set up the VFS directories for all capped tasks
     for tc in capped_tasks:
@@ -391,11 +390,28 @@ async def supervisor_tools(
     # -----------------------------------------------------------------
     if capped_tasks and todo_path and Path(todo_path).exists():
         todo = TodoList.model_validate_json(Path(todo_path).read_text())
+        # Create a normalized index of current tasks: {normalized_text: original_text}
+        task_index = {re.sub(r"[^\w\s]", "", t.lower()).strip(): t for t in todo.tasks}
+
         for tc in capped_tasks:
             completed_topic = tc["args"]["sub_topic"]
-            if completed_topic in todo.tasks:
-                todo.tasks.remove(completed_topic)
-                todo.completed_tasks.append(completed_topic)
+            normalized_completed = re.sub(
+                r"[^\w\s]", "", completed_topic.lower()
+            ).strip()
+
+            # Try exact match first, then fuzzy match
+            if normalized_completed in task_index:
+                matched_task = task_index[normalized_completed]
+            else:
+                matches = difflib.get_close_matches(
+                    normalized_completed, list(task_index.keys()), n=1, cutoff=0.7
+                )
+                matched_task = task_index[matches[0]] if matches else None
+
+            if matched_task and matched_task in todo.tasks:
+                todo.tasks.remove(matched_task)
+                todo.completed_tasks.append(matched_task)
+
         Path(todo_path).write_text(todo.model_dump_json(indent=2))
     return Command(
         goto="supervisor",
@@ -427,10 +443,10 @@ supervisor_subgraph = supervisor_builder.compile()
 async def worker(
     state: WorkerState,
     config: RunnableConfig,
-) -> Command[Literal["worker_tools", "__end__"]]:
+) -> Command[Literal["worker_tools", END]]:
     """Perform specialized research using search tools."""
     # Temporarily returning END to avoid infinite loop before worker is implemented
-    return Command(goto="__end__")
+    return Command(goto=END)
 
 
 async def worker_tools(
@@ -456,7 +472,7 @@ worker_subgraph = worker_builder.compile()
 async def generate_final_report(
     state: GlobalState,
     config: RunnableConfig,
-) -> Command[Literal["__end__"]]:
+) -> Command[Literal[END]]:
     """Synthesize all compressed findings into a final report."""
     # TODO: Implement report synthesis based on VFS content
     return Command(goto=END, update={"final_report": "Report content..."})
