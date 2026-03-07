@@ -9,8 +9,51 @@ from typing import Annotated, Literal
 
 from langchain_core.messages import AnyMessage
 from langgraph.graph import add_messages
-from typing_extensions import TypedDict
 from pydantic import BaseModel, Field
+from typing_extensions import NotRequired, TypedDict
+
+
+# Structured data
+class ConductResearch(BaseModel):
+    """Dispatch a research worker to investigate a specific sub-topic.
+
+    The worker will autonomously decide which Exa search queries to run
+    and how many iterations to perform. You provide the what, not the how.
+    """
+
+    sub_topic: str = Field(
+        description="The specific sub-topic or research question for the worker to investigate. Be precise and focused."
+    )
+    context: str = Field(
+        default="",
+        description=(
+            "Optional strategic context for the worker. E.g., 'A previous worker found X — "
+            "dig deeper into Y' or 'Focus only on post-2022 data'. Leave empty if no special "
+            "direction is needed."
+        ),
+    )
+    output_dirname: str = Field(
+        description=(
+            "The VFS directory name where the worker saves its findings. Use snake_case and be "
+            "descriptive (e.g., 'floating_offshore_wind_lcoe'). Worker will create "
+            "raw_content.md and compressed_summary.md inside this directory."
+        )
+    )
+
+
+class AddSubTopic(BaseModel):
+    """Add a new sub-topic to the research todo list.
+
+    Use this when worker findings reveal an important angle that the original
+    ResearchBrief did not anticipate.
+    """
+
+    new_sub_topic: str = Field(
+        description="The new sub-topic to add to the research plan."
+    )
+    rationale: str = Field(
+        description="Why this sub-topic is worth investigating. Cite the worker finding that surfaced it."
+    )
 
 
 class ResearchBrief(BaseModel):
@@ -34,6 +77,9 @@ class ResearchBrief(BaseModel):
     brief_status: Literal["pending", "approved", "proposed"] = Field(default="pending")
 
 
+# States
+
+
 # Using TypedDict for state because it allows for flexible updates without
 # requiring strict Pydantic validation at every node transition.
 # The GlobalState is the source of truth for the entire graph.
@@ -48,15 +94,18 @@ class GlobalState(TypedDict):
     supervisor_messages: Annotated[list[AnyMessage], add_messages]
 
     # Brief generation status and outputs
-    brief: ResearchBrief
+    brief: NotRequired[ResearchBrief]
 
     # Supervisor coordination
-    todo_list_path: str  # Path to the .json todo list in VFS
-    active_tasks: Annotated[list[str], operator.add]
+    todo_list_path: NotRequired[str]  # Path to the .json todo list in VFS
+    active_tasks: NotRequired[Annotated[list[str], operator.add]]
+
+    # Track VFS directories containing worker findings
+    findings_paths: NotRequired[Annotated[list[str], operator.add]]
 
     # Final outputs
-    research_findings: list[str]
-    final_report: str
+    research_findings: NotRequired[list[str]]
+    final_report: NotRequired[str]
 
 
 # Don't need to use BaseModel here b/c we don't need strict typing and validation
@@ -76,6 +125,9 @@ class SupervisorState(TypedDict):
 
     # Need this to track which workers are active
     active_tasks: Annotated[list[str], operator.add]
+
+    # Track VFS directories containing worker findings
+    findings_paths: Annotated[list[str], operator.add]
 
     # Counter for research iterations to prevent infinite loops
     iteration_count: int
