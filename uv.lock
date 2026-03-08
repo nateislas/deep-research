@@ -587,6 +587,7 @@ name = "deep-research"
 version = "0.0.1"
 source = { editable = "." }
 dependencies = [
+    { name = "exa-py" },
     { name = "langchain" },
     { name = "langchain-anthropic" },
     { name = "langchain-community" },
@@ -616,6 +617,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "exa-py", specifier = ">=1.16.1" },
     { name = "langchain", specifier = ">=1.2.10" },
     { name = "langchain-anthropic", specifier = ">=0.3.0" },
     { name = "langchain-community", specifier = ">=0.4.1" },
