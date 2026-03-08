@@ -51,8 +51,8 @@ from deep_research.utils import (
 MAX_ITERATIONS = 10
 
 # How many workers the supervisor can spawn in a single round.
-# This controls parallelism vs. cost. 3 is a safe default.
-MAX_CONCURRENT_WORKERS = 3
+# 10 allows for high throughput during complex research tasks.
+MAX_CONCURRENT_WORKERS = 10
 
 # --- Nodes ---
 
@@ -349,26 +349,23 @@ def _handle_subtopic_additions(
 
 
 def _mark_tasks_completed(
-    capped_tasks: list[dict],
+    completed_sub_topics: list[str],
     todo_path: str | None,
 ) -> None:
-    """Mark completed worker tasks in the TodoList JSON.
-
-    Uses simple case-insensitive comparison. The LLM writes both the todo task
-    and the ConductResearch sub_topic in the same inference pass, so they are
-    nearly always identical.
+    """Mark completed worker tasks in the TodoList JSON based on sub-topics.
 
     Args:
-        capped_tasks: The ConductResearch tool calls that were actually dispatched.
+        completed_sub_topics: The list of raw sub-topic strings that finished research.
         todo_path: Path to the current todo_list.json.
     """
-    if not capped_tasks or not todo_path or not Path(todo_path).exists():
+    if not completed_sub_topics or not todo_path or not Path(todo_path).exists():
         return
 
     todo = TodoList.model_validate_json(Path(todo_path).read_text())
-    for tc in capped_tasks:
-        completed = tc["args"]["sub_topic"].strip().lower()
-        for task in todo.tasks:
+    for topic_str in completed_sub_topics:
+        completed = topic_str.strip().lower()
+        # Create a copy of tasks to iterate over while potentially modifying the original list
+        for task in list(todo.tasks):
             if task.strip().lower() == completed:
                 todo.tasks.remove(task)
                 todo.completed_tasks.append(task)
@@ -424,17 +421,17 @@ async def supervisor_tools(
         worker_subgraph.ainvoke(
             {
                 "brief": state["brief"],
-                "worker_todo_list_path": str(
-                    run_root / tc["args"]["output_dirname"] / "worker_todo.json"
-                ),
+                "run_root": str(run_root),
+                "output_dirname": tc["args"]["output_dirname"],
                 "researcher_messages": [
                     SystemMessage(content=RESEARCHER_PROMPT),
                     HumanMessage(
                         content=(
                             f"Sub-topic to research: {tc['args']['sub_topic']}\n"
                             f"Additional context: {tc['args'].get('context') or 'None'}\n\n"
-                            f"Run 2-3 targeted searches, then write your distilled findings "
-                            f"to compressed_summary.md. Raw search data is saved automatically."
+                            f"1. Run 2-3 targeted searches.\n"
+                            f"2. Write your distilled findings to 'compressed_summary.md' using the write_file tool.\n"
+                            f"Do NOT finish until you have written your summary file."
                         )
                     ),
                 ],
@@ -446,31 +443,31 @@ async def supervisor_tools(
     # Run them all concurrently. gather() preserves the order!
     results = await asyncio.gather(*research_coroutines, return_exceptions=True)
 
-    # 4. Process results
+    # 4. Process results & Mark completed topics
     worker_msgs: list[ToolMessage] = []
+    completed_topics: list[str] = []
     for tc, result in zip(capped_tasks, results):
         args = tc["args"]
+        topic = args["sub_topic"]
         if isinstance(result, Exception):
             worker_msgs.append(
                 ToolMessage(
-                    content=f"Worker failed on '{args['sub_topic']}': {result!s}",
+                    content=f"Worker failed on '{topic}': {result!s}",
                     tool_call_id=tc["id"],
                 )
             )
             continue
-        vfs_dir = run_root / args["output_dirname"]
-        summary_path = vfs_dir / "compressed_summary.md"
-        if summary_path.exists():
-            snippet = summary_path.read_text()[:800]
-            content = (
-                f"Worker completed: '{args['sub_topic']}'\n\nKey Findings:\n{snippet}"
+        
+        # Worker succeeded. We provide a minimal confirmation in history.
+        # The full summary is accessible via the Research Ledger.
+        worker_msgs.append(
+            ToolMessage(
+                content=f"Worker completed: '{topic}'. Findings saved to VFS.",
+                tool_call_id=tc["id"],
             )
-        else:
-            content = (
-                f"Worker completed: '{args['sub_topic']}' — no summary file found."
-            )
-        worker_msgs.append(ToolMessage(content=content, tool_call_id=tc["id"]))
-        findings_paths.append(str(vfs_dir))
+        )
+        completed_topics.append(topic)
+        findings_paths.append(str(run_root / args["output_dirname"]))
 
     # 5. Deferred task messages
     deferred_msgs = [
@@ -481,8 +478,8 @@ async def supervisor_tools(
         for tc in deferred_tasks
     ]
 
-    # 6. Mark completed tasks in the TodoList
-    _mark_tasks_completed(capped_tasks, todo_path)
+    # 6. Mark successful tasks in the TodoList
+    _mark_tasks_completed(completed_topics, todo_path)
 
     # Combine all tool messages in order
     all_tool_messages = todo_msgs + subtopic_msgs + worker_msgs + deferred_msgs
@@ -519,8 +516,8 @@ async def worker(
     config: RunnableConfig,
 ) -> Command[Literal["worker_tools", END]]:
     """Perform specialized research using search tools."""
-    # 1. Derive the worker's working directory from its todo path
-    worker_dir = str(Path(state["worker_todo_list_path"]).parent)
+    # 1. Derive the worker's working directory
+    worker_dir = str(Path(state["run_root"]) / state["output_dirname"])
 
     # 2. Initialize tools — no vfs_path binding needed here.
     # The actual injection happens in worker_tools when tools are invoked.
@@ -559,7 +556,7 @@ async def worker_tools(
 ) -> Command[Literal["worker"]]:
     """Execute search tools and write raw findings to VFS."""
     last_msg = state["researcher_messages"][-1]
-    worker_dir = str(Path(state["worker_todo_list_path"]).parent)
+    worker_dir = str(Path(state["run_root"]) / state["output_dirname"])
 
     tools_map = {
         t.name: t for t in (get_search_tools() + get_worker_filesystem_tools(worker_dir))

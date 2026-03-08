@@ -136,7 +136,8 @@ class WorkerState(TypedDict):
     """Isolated state for a research sub-agent performing specific search tasks."""
 
     brief: ResearchBrief
-    worker_todo_list_path: str  # Local task list for the specific sub-topic
+    output_dirname: str  # The directory name for this worker's findings
+    run_root: str        # The base VFS path for this thread
 
     # Every worker needs its own message history for its search loop
     # Renamed to researcher_messages so it can be isolated from the supervisor_messages

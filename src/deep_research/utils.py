@@ -237,25 +237,27 @@ def todo_to_string(todo: TodoList) -> str:
 
 
 def get_findings_summary(vfs_root: Path) -> str:
-    """Scan the VFS for completed worker compressed summaries.
-
-    Used to give the supervisor a high-level view of what's been researched.
-    Note: The supervisor primarily sees findings via ToolMessages in its message
-    history. This helper provides a supplementary directory listing.
-
-    Args:
-        vfs_root: The root VFS directory to scan.
-
-    Returns:
-        A formatted string listing completed research topics, or a placeholder
-        if no findings exist yet.
-    """
+    """Read all findings and aggregate their compressed_summary.md contents into a ledger."""
     if not vfs_root.exists():
-        return "No finding files yet."
+        return "No findings yet."
 
     summaries = []
-    for summary_path in vfs_root.glob("**/compressed_summary.md"):
-        topic_name = summary_path.parent.name
-        summaries.append(f"  - {topic_name}")
+    # Identify subdirectories (worker assignments) that have a summary
+    # We glob for all summaries in the current run root
+    for summary_path in sorted(vfs_root.glob("**/compressed_summary.md")):
+        try:
+            content = summary_path.read_text(encoding="utf-8").strip()
+            # Character limit guard to prevent prompt overflow
+            if len(content) > 2000:
+                content = content[:2000] + "... [Truncated]"
+            
+            # Format as a clean section for the ledger
+            topic_name = summary_path.parent.name.replace("_", " ").title()
+            summaries.append(f"### Finding: {topic_name}\n{content}\n")
+        except Exception as e:
+            summaries.append(f"### Finding: {summary_path.parent.name}\n(Error reading summary: {e})\n")
 
-    return "\n".join(summaries) if summaries else "No finding files yet."
+    if not summaries:
+        return "No research results found in VFS yet."
+
+    return "\n---\n".join(summaries)
