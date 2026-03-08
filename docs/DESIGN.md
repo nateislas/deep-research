@@ -170,3 +170,13 @@ The ResearchBrief Prompt:
 * This worked fairly well, and it generates very detailed research briefs. I think this is a good trade-off because the user could easily tell the model to change aspects about the brief if they felt the agent misunderstood their intent
 
 * Decided to essentially hardcode the todolist because we don't need the LLM to decide to create it and where to create it becasue we always need it in the same spot
+
+### Worker
+
+The supervisor creates a detailed ConductResearch object which seeds the worker with a subtopic, additional context, and a directory name. Each worker saves information in a folder assigned to it. There are two files in this folder: raw_content.md and compressed_summary.md. When a worker makes a tool call to exa_search(), the search tool directly appends the ENTIRE search result information (summary, full text excerpts, etc) to the raw_content.md file. The tool returns only a 'summary' and 'highlights' back to the worker to keep the context window small. Upon completion, the worker **must call the write_file tool to save its compressed_summary.md synthesis, which it creates from its own message history.
+
+### Supervisor + Worker loop
+
+Use a single source of truth in the compressed_summary.md files to keep track of the findings.
+
+Upon worker completion, we inject ALL compressed summaries into the supervisors prompt. I decided to go with this approach rather than storing it in the state because I wanted to keep the state with only neccessary informtion that actually needs to be checkpointed and passed between nodes.

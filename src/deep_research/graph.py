@@ -24,6 +24,7 @@ from langgraph.types import Command
 
 from deep_research.prompts import (
     RESEARCH_INTAKE_PROMPT,
+    RESEARCHER_PROMPT,
     SUPERVISOR_PROMPT,
 )
 from deep_research.state import (
@@ -39,6 +40,8 @@ from deep_research.utils import (
     TodoList,
     brief_to_prompt_vars,
     get_findings_summary,
+    get_search_tools,
+    get_worker_filesystem_tools,
     todo_to_string,
     write_todo_list,
 )
@@ -48,8 +51,8 @@ from deep_research.utils import (
 MAX_ITERATIONS = 10
 
 # How many workers the supervisor can spawn in a single round.
-# This controls parallelism vs. cost. 3 is a safe default.
-MAX_CONCURRENT_WORKERS = 3
+# 10 allows for high throughput during complex research tasks.
+MAX_CONCURRENT_WORKERS = 10
 
 # --- Nodes ---
 
@@ -104,8 +107,10 @@ async def research_intake(
         )
     # We need to clarify or propose a brief
     # initialize the model and bind the ResearchBrief as a structured tool
+    # gpt-4.1-mini: sharp enough to infer intent and propose a ResearchBrief;
+    # fast and cheap for the conversational intake loop.
     model = init_chat_model(
-        model="gpt-4o-mini",
+        model="gpt-4.1-mini",
         model_provider="openai",
         temperature=0.1,
     )
@@ -234,7 +239,9 @@ async def supervisor(
         tools = [ConductResearch, AddSubTopic]
 
     # invoke the LLM
-    model = init_chat_model(model="gpt-4o-mini", model_provider="openai")
+    # gpt-4.1: strongest available planner for decomposing the ResearchBrief
+    # and orchestrating workers. Called only ~5-10 times per run, so cost is fine.
+    model = init_chat_model(model="gpt-4.1", model_provider="openai")
     llm_with_tools = model.bind_tools(tools)
     response = await llm_with_tools.ainvoke(messages)
 
@@ -248,7 +255,28 @@ async def supervisor(
             },
         )
     else:
-        # No tool calls = LLM determined research is complete
+        # No tool calls — check if there are still pending tasks before allowing exit.
+        # This prevents small models from quitting prematurely after a TodoList write.
+        if todo_path and Path(todo_path).exists():
+            todo = TodoList.model_validate_json(Path(todo_path).read_text())
+            if todo.tasks:  # still has pending items
+                # Inject a corrective nudge and loop back to supervisor
+                nudge = HumanMessage(
+                    content=(
+                        f"You have {len(todo.tasks)} pending research tasks remaining. "
+                        "You must call ConductResearch for each one before declaring done. "
+                        "Do NOT stop until all tasks are completed."
+                    )
+                )
+                return Command(
+                    goto="supervisor",
+                    update={
+                        "supervisor_messages": [response, nudge],
+                        "iteration_count": iter_count + 1,
+                    },
+                )
+
+        # All tasks complete — LLM correctly determined research is done
         return Command(
             goto=END,
             update={"supervisor_messages": [response]},
@@ -321,26 +349,23 @@ def _handle_subtopic_additions(
 
 
 def _mark_tasks_completed(
-    capped_tasks: list[dict],
+    completed_sub_topics: list[str],
     todo_path: str | None,
 ) -> None:
-    """Mark completed worker tasks in the TodoList JSON.
-
-    Uses simple case-insensitive comparison. The LLM writes both the todo task
-    and the ConductResearch sub_topic in the same inference pass, so they are
-    nearly always identical.
+    """Mark completed worker tasks in the TodoList JSON based on sub-topics.
 
     Args:
-        capped_tasks: The ConductResearch tool calls that were actually dispatched.
+        completed_sub_topics: The list of raw sub-topic strings that finished research.
         todo_path: Path to the current todo_list.json.
     """
-    if not capped_tasks or not todo_path or not Path(todo_path).exists():
+    if not completed_sub_topics or not todo_path or not Path(todo_path).exists():
         return
 
     todo = TodoList.model_validate_json(Path(todo_path).read_text())
-    for tc in capped_tasks:
-        completed = tc["args"]["sub_topic"].strip().lower()
-        for task in todo.tasks:
+    for topic_str in completed_sub_topics:
+        completed = topic_str.strip().lower()
+        # Create a copy of tasks to iterate over while potentially modifying the original list
+        for task in list(todo.tasks):
             if task.strip().lower() == completed:
                 todo.tasks.remove(task)
                 todo.completed_tasks.append(task)
@@ -396,20 +421,17 @@ async def supervisor_tools(
         worker_subgraph.ainvoke(
             {
                 "brief": state["brief"],
-                "worker_todo_list_path": str(
-                    run_root / tc["args"]["output_dirname"] / "worker_todo.json"
-                ),
+                "run_root": str(run_root),
+                "output_dirname": tc["args"]["output_dirname"],
                 "researcher_messages": [
-                    SystemMessage(
-                        content="You are a research worker. Search for information on your assigned topic and write findings to the VFS."
-                    ),
+                    SystemMessage(content=RESEARCHER_PROMPT),
                     HumanMessage(
                         content=(
                             f"Sub-topic to research: {tc['args']['sub_topic']}\n"
                             f"Additional context: {tc['args'].get('context') or 'None'}\n\n"
-                            f"Save your findings to these files in your VFS directory:\n"
-                            f"  - raw_content.md      (full search results)\n"
-                            f"  - compressed_summary.md (your distilled key findings)"
+                            f"1. Run 2-3 targeted searches.\n"
+                            f"2. Write your distilled findings to 'compressed_summary.md' using the write_file tool.\n"
+                            f"Do NOT finish until you have written your summary file."
                         )
                     ),
                 ],
@@ -421,31 +443,31 @@ async def supervisor_tools(
     # Run them all concurrently. gather() preserves the order!
     results = await asyncio.gather(*research_coroutines, return_exceptions=True)
 
-    # 4. Process results
+    # 4. Process results & Mark completed topics
     worker_msgs: list[ToolMessage] = []
+    completed_topics: list[str] = []
     for tc, result in zip(capped_tasks, results):
         args = tc["args"]
+        topic = args["sub_topic"]
         if isinstance(result, Exception):
             worker_msgs.append(
                 ToolMessage(
-                    content=f"Worker failed on '{args['sub_topic']}': {result!s}",
+                    content=f"Worker failed on '{topic}': {result!s}",
                     tool_call_id=tc["id"],
                 )
             )
             continue
-        vfs_dir = run_root / args["output_dirname"]
-        summary_path = vfs_dir / "compressed_summary.md"
-        if summary_path.exists():
-            snippet = summary_path.read_text()[:800]
-            content = (
-                f"Worker completed: '{args['sub_topic']}'\n\nKey Findings:\n{snippet}"
+        
+        # Worker succeeded. We provide a minimal confirmation in history.
+        # The full summary is accessible via the Research Ledger.
+        worker_msgs.append(
+            ToolMessage(
+                content=f"Worker completed: '{topic}'. Findings saved to VFS.",
+                tool_call_id=tc["id"],
             )
-        else:
-            content = (
-                f"Worker completed: '{args['sub_topic']}' — no summary file found."
-            )
-        worker_msgs.append(ToolMessage(content=content, tool_call_id=tc["id"]))
-        findings_paths.append(str(vfs_dir))
+        )
+        completed_topics.append(topic)
+        findings_paths.append(str(run_root / args["output_dirname"]))
 
     # 5. Deferred task messages
     deferred_msgs = [
@@ -456,8 +478,8 @@ async def supervisor_tools(
         for tc in deferred_tasks
     ]
 
-    # 6. Mark completed tasks in the TodoList
-    _mark_tasks_completed(capped_tasks, todo_path)
+    # 6. Mark successful tasks in the TodoList
+    _mark_tasks_completed(completed_topics, todo_path)
 
     # Combine all tool messages in order
     all_tool_messages = todo_msgs + subtopic_msgs + worker_msgs + deferred_msgs
@@ -494,8 +516,38 @@ async def worker(
     config: RunnableConfig,
 ) -> Command[Literal["worker_tools", END]]:
     """Perform specialized research using search tools."""
-    # TODO: Implement the real worker logic (search + file writing)
-    raise NotImplementedError("worker node logic not implemented")
+    # 1. Derive the worker's working directory
+    worker_dir = str(Path(state["run_root"]) / state["output_dirname"])
+
+    # 2. Initialize tools — no vfs_path binding needed here.
+    # The actual injection happens in worker_tools when tools are invoked.
+    search_tools = get_search_tools()
+    fs_tools = get_worker_filesystem_tools(worker_dir)
+    all_tools = search_tools + fs_tools
+
+    # 3. Initialize Model & Bind Tools
+    # gpt-5-nano w/ low reasoning_effort: nearly free ($0.05/1M in), fast,
+    # and capable enough for targeted search + synthesis tasks.
+    model = init_chat_model(
+        model="gpt-5-nano",
+        model_provider="openai",
+        reasoning_effort="low",
+    )
+    # We bind all tools so the worker can search OR write files
+    llm_with_tools = model.bind_tools(all_tools)
+
+    # 4. Invoke LLM
+    # Note: The initial prompt is already in state["researcher_messages"]
+    # from the supervisor's dispatch.
+    messages = state["researcher_messages"]
+    response = await llm_with_tools.ainvoke(messages)
+
+    # 5. Routing Logic
+    if response.tool_calls:
+        return Command(goto="worker_tools", update={"researcher_messages": [response]})
+
+    # No tool calls means the worker is satisfied with its findings
+    return Command(goto=END)
 
 
 async def worker_tools(
@@ -503,8 +555,35 @@ async def worker_tools(
     config: RunnableConfig,
 ) -> Command[Literal["worker"]]:
     """Execute search tools and write raw findings to VFS."""
-    # TODO: Implement Tavily/Exa tool calls
-    return Command(goto="worker")
+    last_msg = state["researcher_messages"][-1]
+    worker_dir = str(Path(state["run_root"]) / state["output_dirname"])
+
+    tools_map = {
+        t.name: t for t in (get_search_tools() + get_worker_filesystem_tools(worker_dir))
+    }
+
+    tool_messages = []
+    for tc in last_msg.tool_calls:
+        tool = tools_map.get(tc["name"])
+        if tool:
+            args = dict(tc["args"])
+            # Inject vfs_path into exa_search calls so raw content is auto-logged.
+            # We do it here (at invocation time) because functools.partial doesn't
+            # work with StructuredTool's _arun dispatch path.
+            if tc["name"] == "exa_search":
+                args["vfs_path"] = worker_dir
+            result = await tool.ainvoke(args)
+            tool_messages.append(
+                ToolMessage(content=str(result), tool_call_id=tc["id"])
+            )
+        else:
+            tool_messages.append(
+                ToolMessage(
+                    content=f"Tool {tc['name']} not found.", tool_call_id=tc["id"]
+                )
+            )
+
+    return Command(goto="worker", update={"researcher_messages": tool_messages})
 
 
 worker_builder = StateGraph(WorkerState)
@@ -532,8 +611,15 @@ async def generate_final_report(
 
 deep_research_builder = StateGraph(GlobalState)
 
+# Need a node for research_intake to call the research_brief tool
+# This also performs question clarification
 deep_research_builder.add_node("research_intake", research_intake)
+
+# The supervisor recieves the full ResearchBrief, and decomposes it
+# into actionable sub-steps
 deep_research_builder.add_node("supervisor", supervisor_subgraph)
+
+
 deep_research_builder.add_node("generate_final_report", generate_final_report)
 
 deep_research_builder.add_edge(START, "research_intake")
