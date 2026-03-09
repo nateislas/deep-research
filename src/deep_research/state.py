@@ -30,7 +30,8 @@ class ResearchTask(BaseModel):
     output_dirname: str = Field(
         description=(
             "The VFS directory name where the worker saves its findings. Use snake_case."
-        )
+        ),
+        pattern=r"^[a-z0-9_]+$",
     )
 
 
@@ -42,7 +43,8 @@ class ConductResearchBatch(BaseModel):
     """
 
     tasks: list[ResearchTask] = Field(
-        description="A list of pending research tasks to dispatch to workers."
+        description="A list of pending research tasks to dispatch to workers.",
+        min_length=1,
     )
 
 
@@ -65,7 +67,8 @@ class AddSubTopicBatch(BaseModel):
     """
 
     topics: list[NewSubTopic] = Field(
-        description="A list of new sub-topics to add to the research plan."
+        description="A list of new sub-topics to add to the research plan.",
+        min_length=1,
     )
 
 
@@ -83,8 +86,8 @@ class ResearchBrief(BaseModel):
     )
     sub_objectives: list[str] = Field(
         description="A list of 4-6 foundational, actionable search directives. These must be empirical and searchable categories of information. Do not include methodological instructions.",
-        min_items=4,
-        max_items=6,
+        min_length=4,
+        max_length=6,
     )
 
     brief_status: Literal["pending", "approved", "proposed"] = Field(default="pending")
@@ -111,7 +114,6 @@ class GlobalState(TypedDict):
 
     # Supervisor coordination
     todo_list_path: NotRequired[str]  # Path to the .json todo list in VFS
-    todo_list_path: NotRequired[str]  # Path to the .json todo list in VFS
 
     # Track VFS directories containing worker findings
     findings_paths: NotRequired[Annotated[list[str], operator.add]]
@@ -134,8 +136,6 @@ class SupervisorState(TypedDict):
     # Path to the .json todo list in VFS.
     # NotRequired because it's None on the first supervisor iteration before the LLM creates one.
     todo_list_path: NotRequired[str]
-
-    # Track VFS directories containing worker findings
 
     # Track VFS directories containing worker findings
     findings_paths: NotRequired[Annotated[list[str], operator.add]]

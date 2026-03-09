@@ -15,12 +15,13 @@ from typing import Literal
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import (
     AIMessage,
+    AnyMessage,
     HumanMessage,
     SystemMessage,
     ToolMessage,
 )
 from langchain_core.runnables import RunnableConfig
-from langgraph.graph import END, START, StateGraph
+from langgraph.graph import START, StateGraph
 from langgraph.types import Command
 
 from deep_research.prompts import (
@@ -53,7 +54,7 @@ from deep_research.utils import (
 )
 
 # Hard limit on supervisor iterations to prevent infinite research loops.
-# If research isn't done in 10 rounds, something is wrong with the prompt or model.
+# If research isn't done in 15 rounds, something is wrong with the prompt or model.
 MAX_ITERATIONS = 15
 
 # How many workers the supervisor can spawn in a single round.
@@ -66,7 +67,7 @@ MAX_CONCURRENT_WORKERS = 10
 async def research_intake(
     state: GlobalState,
     config: RunnableConfig,
-) -> Command[Literal["supervisor", END]]:
+) -> Command[Literal["supervisor", "__end__"]]:
     """Handle the intake conversation and brief finalization."""
     messages = state["messages"]
     last_user_msg = ""
@@ -173,7 +174,7 @@ async def research_intake(
 async def supervisor(
     state: SupervisorState,
     config: RunnableConfig,
-) -> Command[Literal["supervisor_tools", END]]:
+) -> Command[Literal["supervisor", "supervisor_tools", "__end__"]]:
     """Plan research strategy using tools to read the brief and todo list.
 
     The supervisor acts as a manager that pulls context from the VFS as needed.
@@ -184,7 +185,7 @@ async def supervisor(
     # If we've reached the max iterations, end the graph
     if iter_count >= MAX_ITERATIONS:
         return Command(
-            goto=END,
+            goto="__end__",
             update={
                 "supervisor_messages": [
                     AIMessage(
@@ -211,6 +212,7 @@ async def supervisor(
     todo_list_exists = todo_path is not None and Path(todo_path).exists()
 
     if todo_list_exists:
+        assert todo_path is not None
         # Load the todo list so we can display its status in the prompt
         todo = TodoList.model_validate_json(Path(todo_path).read_text())
         todo_status_str = todo_to_string(todo)
@@ -236,7 +238,7 @@ async def supervisor(
     )
 
     if not state["supervisor_messages"]:
-        messages = [system_message]
+        messages: list[AnyMessage] = [system_message]
         # Also notify the user in the main chat
         main_chat_update = [
             AIMessage(
@@ -246,7 +248,7 @@ async def supervisor(
     else:
         # Update the existing memory by replacing the old system message (first element)
         # with the freshly formatted one containing new state.
-        messages = state["supervisor_messages"].copy()
+        messages = list(state["supervisor_messages"])
         if messages and isinstance(messages[0], SystemMessage):
             messages[0] = system_message
         else:
@@ -303,7 +305,7 @@ async def supervisor(
 
         # All tasks complete — LLM correctly determined research is done
         return Command(
-            goto=END,
+            goto="__end__",
             update={
                 "supervisor_messages": [response],
                 "messages": [
@@ -325,7 +327,10 @@ async def supervisor_tools(
     """Execute research tasks by invoking the worker_subgraph in parallel."""
     # extract the tool calls from the LLM's last message
     last_ai_message = state["supervisor_messages"][-1]
-    tool_calls = last_ai_message.tool_calls
+    if not isinstance(last_ai_message, AIMessage):
+        tool_calls = getattr(last_ai_message, "tool_calls", [])
+    else:
+        tool_calls = last_ai_message.tool_calls
 
     # Bin the tool calls by type so we can handle each category differently
     # Bin the tool calls by type
@@ -357,7 +362,6 @@ async def supervisor_tools(
             all_task_items.append({"args": t_args, "batch_id": bc["id"]})
 
     capped_tasks = all_task_items[:MAX_CONCURRENT_WORKERS]
-    deferred_tasks = all_task_items[MAX_CONCURRENT_WORKERS:]
 
     # Setup variables for workers
     worker_inputs = []
@@ -412,7 +416,7 @@ async def supervisor_tools(
                         )
                     ),
                 ],
-            },
+            },  # type: ignore
             config=config,
         )
         for item in worker_inputs
@@ -435,18 +439,19 @@ async def supervisor_tools(
             batch_outcomes[batch_id].append(f"Task {task_id} FAILED: {result!s}")
             continue
 
+        worker_output_dir = run_root / item["args"]["output_dirname"]
+        summary_file = worker_output_dir / "compressed_summary.md"
+        if not summary_file.exists():
+            batch_outcomes[batch_id].append(
+                f"Task {task_id} FAILED: Missing compressed_summary.md from worker."
+            )
+            continue
+
         batch_outcomes[batch_id].append(
             f"Task {task_id} COMPLETED: {sub_topic[:40]}..."
         )
         completed_task_ids.append(task_id)
         new_findings_paths.append(str(run_root / item["args"]["output_dirname"]))
-
-    # Add deferred tasks to the outcomes
-    for item in deferred_tasks:
-        batch_id = item["batch_id"]
-        batch_outcomes[batch_id].append(
-            f"Task {item['args']['task_id']} DEFERRED (worker limit reached)."
-        )
 
     # Build ToolMessages for the batches
     batch_msgs = [
@@ -462,6 +467,18 @@ async def supervisor_tools(
 
     # Combine all tool messages in order
     all_tool_messages = todo_msgs + subtopic_msgs + batch_msgs
+
+    # Catch any unhandled tool calls to prevent OpenAI BadRequestError
+    handled_ids = {m.tool_call_id for m in all_tool_messages}
+    unhandled_msgs = [
+        ToolMessage(
+            content=f"Error: Unknown tool or unhandled tool call {tc['name']}",
+            tool_call_id=tc["id"],
+        )
+        for tc in tool_calls
+        if tc["id"] not in handled_ids
+    ]
+    all_tool_messages += unhandled_msgs
 
     return Command(
         goto="supervisor",
@@ -493,7 +510,7 @@ supervisor_subgraph = supervisor_builder.compile()
 async def worker(
     state: WorkerState,
     config: RunnableConfig,
-) -> Command[Literal["worker_tools", END]]:
+) -> Command[Literal["worker_tools", "__end__"]]:
     """Perform specialized research using search tools."""
     # 1. Derive the worker's working directory
     worker_dir = str(Path(state["run_root"]) / state["output_dirname"])
@@ -526,7 +543,7 @@ async def worker(
         return Command(goto="worker_tools", update={"researcher_messages": [response]})
 
     # No tool calls means the worker is satisfied with its findings
-    return Command(goto=END)
+    return Command(goto="__end__")
 
 
 async def worker_tools(
@@ -535,6 +552,11 @@ async def worker_tools(
 ) -> Command[Literal["worker"]]:
     """Execute search tools and write raw findings to VFS."""
     last_msg = state["researcher_messages"][-1]
+    if not isinstance(last_msg, AIMessage):
+        tool_calls = getattr(last_msg, "tool_calls", [])
+    else:
+        tool_calls = last_msg.tool_calls
+
     worker_dir = str(Path(state["run_root"]) / state["output_dirname"])
 
     tools_map = {
@@ -543,7 +565,7 @@ async def worker_tools(
     }
 
     tool_messages = []
-    for tc in last_msg.tool_calls:
+    for tc in tool_calls:
         tool = tools_map.get(tc["name"])
         if tool:
             args = dict(tc["args"])
@@ -600,7 +622,7 @@ worker_subgraph = worker_builder.compile()
 async def generate_final_report(
     state: GlobalState,
     config: RunnableConfig,
-) -> Command[Literal[END]]:
+) -> Command[Literal["__end__"]]:
     """Synthesize all compressed findings into a final report."""
     # 1. Prepare data
     thread_id = config["configurable"].get("thread_id", "default")
@@ -615,7 +637,7 @@ async def generate_final_report(
         try:
             todo = TodoList.model_validate_json(todo_path.read_text())
             completed_tasks_str = "\n".join(
-                [f"- [x] {t}" for t in todo.completed_tasks]
+                [f"- [x] {t.task}" for t in todo.completed_tasks]
             )
         except Exception:
             pass
@@ -679,11 +701,19 @@ async def generate_final_report(
     try:
         report_file = run_root / "final_report.md"
         report_file.write_text(report_text, encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as e:
+        import logging
+
+        logging.exception(f"Failed to write final_report.md: {e}")
+        return Command(
+            goto="__end__",
+            update={
+                "messages": [AIMessage(content=f"Failed to save final report: {e}")]
+            },
+        )
 
     return Command(
-        goto=END,
+        goto="__end__",
         update={
             "final_report": report_text,
             "messages": [

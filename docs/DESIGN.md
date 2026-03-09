@@ -198,3 +198,5 @@ Kept having problems where the supervisor would only spawn a couple at a time in
 Did the same for adding suptopics
 
 Want to play around with MAX_CONCURRENT_WORKERS and generating fewer initial sub-topics in the research brief
+
+Sometimes it runs for at least 4 itereations, other times 10. sOmetimes it has many additional topics added, other times it's only a few.

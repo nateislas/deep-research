@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from typing import Any
 
 from langchain_core.messages import ToolMessage
 from pydantic import BaseModel, Field
@@ -52,7 +53,7 @@ def write_todo_list(todo: TodoList, path: Path) -> None:
 
 
 def handle_todo_updates(
-    todo_update_calls: list[dict],
+    todo_update_calls: list[dict[str, Any]],
     run_root: Path,
     todo_path: str | None,
 ) -> tuple[str | None, list[ToolMessage]]:
@@ -73,12 +74,22 @@ def handle_todo_updates(
 
 
 def handle_subtopic_additions(
-    add_subtopic_calls: list[dict],
+    add_subtopic_calls: list[dict[str, Any]],
     todo_path: str | None,
 ) -> list[ToolMessage]:
     """Append new sub-topics to the existing TodoList on disk."""
     messages: list[ToolMessage] = []
-    if not add_subtopic_calls or not todo_path or not Path(todo_path).exists():
+    if not add_subtopic_calls:
+        return messages
+
+    if not todo_path or not Path(todo_path).exists():
+        for bc in add_subtopic_calls:
+            messages.append(
+                ToolMessage(
+                    content="ERROR: Cannot add sub-topics because no TodoList exists yet. Please create one using update_todo_list first.",
+                    tool_call_id=bc["id"],
+                )
+            )
         return messages
 
     todo = TodoList.model_validate_json(Path(todo_path).read_text())
@@ -235,9 +246,8 @@ def get_findings_summary(vfs_root: Path) -> str:
                         topic_name = summary_path.parent.name.replace("_", " ").title()
                         all_leads.append(f"### Leads from {topic_name}:\n{leads_raw}")
 
-            # Character limit guard to prevent prompt overflow
-            # if len(content) > 4000:
-            #    content = content[:4000] + "... [Truncated]"
+            # Truncation logic has been intentionally removed because LangGraph/LLMs
+            # now natively handle very large context windows dynamically.
 
             # Format as a clean section for the summary
             topic_dir = summary_path.parent.name

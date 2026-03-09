@@ -148,7 +148,7 @@ For each finding above, explicitly answer: **"How does this specifically provide
 - Every factual claim MUST have an inline URL citation
 - Include real numbers — percentages, dollar figures, dates, measurements
 - NO vague generalities ("some experts say...") without a source
-- You MUST anchor every finding in the Main Objective via the Strategic Impact section.
+- You MUST anchor every finding in the Main Objective via the "Relevance to Objective" section.
 
 ---
 

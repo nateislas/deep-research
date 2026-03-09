@@ -5,7 +5,7 @@ from pathlib import Path
 
 from exa_py import Exa
 from langchain_community.agent_toolkits import FileManagementToolkit
-from langchain_core.tools import BaseTool, tool
+from langchain_core.tools import BaseTool, StructuredTool, tool
 
 # --- Worker File Management Tools ---
 
@@ -28,31 +28,39 @@ def get_worker_filesystem_tools(worker_vfs_dir: str) -> list[BaseTool]:
     final_tools = []
     for t in all_tools:
         if t.name == "write_file":
-            # Wrap the write tool to protect raw_content.md
-            original_run = t._run
-            original_arun = t._arun
+            original_tool = t
 
-            def protected_run(*args, **kwargs):
-                file_path = kwargs.get("file_path") or (args[0] if args else None)
+            def protected_write(file_path: str, text: str, append: bool = False) -> str:
+                """Write a file to the VFS. NOTE: 'raw_content.md' is PROTECTED and cannot be written manually."""
                 if file_path and (
                     file_path == "raw_content.md"
                     or file_path.endswith("/raw_content.md")
                 ):
                     return "ERROR: 'raw_content.md' is managed automatically by 'exa_search'. Manual writes are forbidden to prevent data loss. Please write your synthesis to 'compressed_summary.md' instead."
-                return original_run(*args, **kwargs)
+                return original_tool.invoke(
+                    {"file_path": file_path, "text": text, "append": append}
+                )
 
-            async def protected_arun(*args, **kwargs):
-                file_path = kwargs.get("file_path") or (args[0] if args else None)
+            async def protected_awrite(
+                file_path: str, text: str, append: bool = False
+            ) -> str:
+                """Write a file to the VFS. NOTE: 'raw_content.md' is PROTECTED and cannot be written manually."""
                 if file_path and (
                     file_path == "raw_content.md"
                     or file_path.endswith("/raw_content.md")
                 ):
                     return "ERROR: 'raw_content.md' is managed automatically by 'exa_search'. Manual writes are forbidden to prevent data loss. Please write your synthesis to 'compressed_summary.md' instead."
-                return await original_arun(*args, **kwargs)
+                return await original_tool.ainvoke(
+                    {"file_path": file_path, "text": text, "append": append}
+                )
 
-            t._run = protected_run
-            t._arun = protected_arun
-            t.description = "Write a file to the VFS. NOTE: 'raw_content.md' is PROTECTED and cannot be written manually."
+            t = StructuredTool.from_function(
+                func=protected_write,
+                coroutine=protected_awrite,
+                name="write_file",
+                description="Write a file to the VFS. NOTE: 'raw_content.md' is PROTECTED and cannot be written manually.",
+                args_schema=original_tool.args_schema,
+            )
 
         final_tools.append(t)
 
@@ -102,9 +110,9 @@ def exa_search(
         livecrawl=livecrawl,
         category=category,
         start_published_date=start_published_date,
-        text={"max_characters": 8000},
-        highlights={"query": query, "num_sentences": 5},
-        summary={"query": query},
+        text={"max_characters": 8000},  # type: ignore
+        highlights={"query": query, "num_sentences": 5},  # type: ignore
+        summary={"query": query},  # type: ignore
     )
 
     if not results.results:
