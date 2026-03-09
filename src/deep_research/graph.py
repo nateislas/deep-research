@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import datetime
-import re
 from pathlib import Path
 from typing import Literal
 
@@ -32,6 +31,7 @@ from deep_research.prompts import (
 )
 from deep_research.state import (
     AddSubTopicBatch,
+    ApproveBrief,
     ConductResearchBatch,
     GlobalState,
     ResearchBrief,
@@ -69,103 +69,61 @@ async def research_intake(
     config: RunnableConfig,
 ) -> Command[Literal["supervisor", "__end__"]]:
     """Handle the intake conversation and brief finalization."""
-    messages = state["messages"]
-    last_user_msg = ""
-    # Extract last user message content safely (handle lists for multimodal models)
-    for m in reversed(messages):
-        if isinstance(m, HumanMessage):
-            if isinstance(m.content, str):
-                last_user_msg = m.content.lower()
-            elif isinstance(m.content, list):
-                # Join text parts if it's a list (multimodal format)
-                last_user_msg = " ".join(
-                    [
-                        part["text"]
-                        for part in m.content
-                        if isinstance(part, dict) and part.get("type") == "text"
-                    ]
-                ).lower()
-            break
-
-    # 1. The brief is approved
-    # Regex for whole-word positive phrases, avoiding simple substrings.
-    approval_pattern = re.compile(
-        r"\b(approve|approved|i approve|agree|yes|correct|looks good)\b"
-    )
-    # Basic negation check to ensure "don't approve" isn't caught.
-    negation_pattern = re.compile(r"\b(don't|dont|not|never|no|stop|reject)\b")
-
-    is_approved = bool(approval_pattern.search(last_user_msg)) and not bool(
-        negation_pattern.search(last_user_msg)
-    )
-
-    if is_approved and state.get("brief"):
-        # update the brief status to approved
-        updated_brief = state["brief"].model_copy(update={"brief_status": "approved"})
-        return Command(
-            goto="supervisor",
-            update={
-                "brief": updated_brief,
-                "todo_list_path": state.get("todo_list_path"),
-                "messages": [
-                    AIMessage(
-                        content=f"Research Brief Approved. Starting deep research phase for: *{updated_brief.topic}*."
-                    )
-                ],
-                "supervisor_messages": [],  # Explicitly initialize supervisor history
-                "iteration_count": 0,  # Initialize loop counter
-            },
-        )
-    # We need to clarify or propose a brief
-    # initialize the model and bind the ResearchBrief as a structured tool
-    # gpt-4.1-mini: sharp enough to infer intent and propose a ResearchBrief;
-    # fast and cheap for the conversational intake loop.
+    # 1. Initialize model and bind tools
+    # gpt-5-nano: sharp enough to infer intent, fast, and cheap.
     model = init_chat_model(
         model="gpt-5-nano", model_provider="openai", reasoning_effort="low"
-    )
+    ).bind_tools([ResearchBrief, ApproveBrief])
 
-    # want to use bind_tools instead of bind_structured_tool
-    # bind_structured_tool would require the model to respond with a ResearchBrief
-    llm_with_brief_tool = model.bind_tools([ResearchBrief])
+    # 2. Invoke LLM with the system prompt and history
+    history = [SystemMessage(content=RESEARCH_INTAKE_PROMPT)] + state["messages"]
+    response = await model.ainvoke(history)
 
-    # Prepend the system prompt to the history
-    system_message = SystemMessage(content=RESEARCH_INTAKE_PROMPT)
-    # Filter messages to avoid context overflow if conversation gets very long
-    history = [system_message] + messages
-    response = await llm_with_brief_tool.ainvoke(history)
-
-    # 3. Process the Output
-    # If the model called the ResearchBrief tool to propose a plan
+    # 3. Process Tool Calls for structured transitions
     if response.tool_calls:
-        brief_args = response.tool_calls[0]["args"].copy()
-        # Ensure we don't have duplicate status arguments
-        brief_args.pop("brief_status", None)
-
-        # create a new ResearchBrief object with status "proposed"
-        new_brief = ResearchBrief(**brief_args, brief_status="proposed")
-
-        # Extract the assistant's thinking/text if it exists, otherwise use a default
-        instruction = "I've drafted a research plan. Please review the objectives and scope below. Type **'Approve'** to start research, or let me know if you'd like to adjust it."
-
-        # If the LLM included text (thinking/rationale) in the response content,
-        # we keep it so the user sees the reasoning.
-        if (
-            response.content
-            and isinstance(response.content, str)
-            and len(response.content.strip()) > 0
-        ):
-            ui_message = AIMessage(content=f"{response.content}\n\n{instruction}")
-        else:
-            ui_message = AIMessage(content=instruction)
-
-        return Command(
-            update={
-                "messages": [
-                    ui_message,  # CodeRabbit: Do NOT persist the unresolved tool call 'response'
-                ],
-                "brief": new_brief,
-            }
+        # Check for approval first (moves to supervisor phase)
+        approval_call = next(
+            (tc for tc in response.tool_calls if tc["name"] == "ApproveBrief"), None
         )
+        if approval_call and state.get("brief"):
+            updated_brief = state["brief"].model_copy(update={"brief_status": "approved"})
+            return Command(
+                goto="supervisor",
+                update={
+                    "brief": updated_brief,
+                    "todo_list_path": state.get("todo_list_path"),
+                    "messages": [
+                        AIMessage(
+                            content=f"Research Brief Approved. Starting deep research phase for: *{updated_brief.topic}*."
+                        )
+                    ],
+                    "supervisor_messages": [],
+                    "iteration_count": 0,
+                },
+            )
+
+        # Check for ResearchBrief call (proposes/updates the plan)
+        brief_call = next(
+            (tc for tc in response.tool_calls if tc["name"] == "ResearchBrief"), None
+        )
+        if brief_call:
+            brief_args = brief_call["args"].copy()
+            brief_args.pop("brief_status", None)
+            new_brief = ResearchBrief(**brief_args, brief_status="proposed")
+
+            instruction = "I've drafted a research plan. Please review the objectives and scope below. Type **'Approve'** to start research, or let me know if you'd like to adjust it."
+            content = (
+                f"{response.content}\n\n{instruction}"
+                if response.content
+                else instruction
+            )
+
+            return Command(
+                update={
+                    "messages": [AIMessage(content=content)],
+                    "brief": new_brief,
+                }
+            )
 
     # 4. Standard Text Response (Clarification Question)
     return Command(update={"messages": [response]})

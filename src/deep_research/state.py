@@ -93,6 +93,16 @@ class ResearchBrief(BaseModel):
     brief_status: Literal["pending", "approved", "proposed"] = Field(default="pending")
 
 
+class ApproveBrief(BaseModel):
+    """Signifies that the user has explicitly approved the current research brief.
+
+    Call this tool only when the user says 'Approve', 'Yes', 'Looks good', etc.
+    This will finalize the plan and start the active research phase.
+    """
+
+    pass
+
+
 # =========================== States ===========================
 
 
