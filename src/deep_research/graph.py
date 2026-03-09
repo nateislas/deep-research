@@ -30,27 +30,31 @@ from deep_research.prompts import (
     SUPERVISOR_PROMPT,
 )
 from deep_research.state import (
-    AddSubTopic,
-    ConductResearch,
+    AddSubTopicBatch,
+    ConductResearchBatch,
     GlobalState,
     ResearchBrief,
     SupervisorState,
     WorkerState,
+)
+from deep_research.tools import (
+    get_search_tools,
+    get_worker_filesystem_tools,
 )
 from deep_research.utils import (
     RESEARCH_ROOT,
     TodoList,
     brief_to_prompt_vars,
     get_findings_summary,
-    get_search_tools,
-    get_worker_filesystem_tools,
+    handle_subtopic_additions,
+    handle_todo_updates,
+    mark_tasks_completed,
     todo_to_string,
-    write_todo_list,
 )
 
 # Hard limit on supervisor iterations to prevent infinite research loops.
 # If research isn't done in 10 rounds, something is wrong with the prompt or model.
-MAX_ITERATIONS = 10
+MAX_ITERATIONS = 15
 
 # How many workers the supervisor can spawn in a single round.
 # 10 allows for high throughput during complex research tasks.
@@ -108,7 +112,6 @@ async def research_intake(
                     )
                 ],
                 "supervisor_messages": [],  # Explicitly initialize supervisor history
-                "active_tasks": [],  # Explicitly initialize task list
                 "iteration_count": 0,  # Initialize loop counter
             },
         )
@@ -117,9 +120,7 @@ async def research_intake(
     # gpt-4.1-mini: sharp enough to infer intent and propose a ResearchBrief;
     # fast and cheap for the conversational intake loop.
     model = init_chat_model(
-        model="gpt-4.1-mini",
-        model_provider="openai",
-        temperature=0.1,
+        model="gpt-5-nano", model_provider="openai", reasoning_effort="low"
     )
 
     # want to use bind_tools instead of bind_structured_tool
@@ -222,20 +223,20 @@ async def supervisor(
     # Build the message history
     brief = state["brief"]
 
-    # If there is not a message history with the supervisor yet, we're going to
-    # inject the necessary context
-    if not state["supervisor_messages"]:
-        prompt_vars = brief_to_prompt_vars(brief)
-        system_message = SystemMessage(
-            content=SUPERVISOR_PROMPT.format(  # fill the prompt with the context
-                **prompt_vars,
-                todo_status=todo_status_str,
-                findings_summary=get_findings_summary(run_root),
-                max_concurrent_workers=MAX_CONCURRENT_WORKERS,
-            )
+    # Always regenerate the system message on every iteration so it sees
+    # the LATEST todo_status and findings_summary
+    prompt_vars = brief_to_prompt_vars(brief)
+    system_message = SystemMessage(
+        content=SUPERVISOR_PROMPT.format(
+            **prompt_vars,
+            todo_status=todo_status_str,
+            findings_summary=get_findings_summary(run_root),
+            max_concurrent_workers=MAX_CONCURRENT_WORKERS,
         )
-        messages = [system_message]
+    )
 
+    if not state["supervisor_messages"]:
+        messages = [system_message]
         # Also notify the user in the main chat
         main_chat_update = [
             AIMessage(
@@ -243,21 +244,27 @@ async def supervisor(
             )
         ]
     else:
-        messages = state["supervisor_messages"]
+        # Update the existing memory by replacing the old system message (first element)
+        # with the freshly formatted one containing new state.
+        messages = state["supervisor_messages"].copy()
+        if messages and isinstance(messages[0], SystemMessage):
+            messages[0] = system_message
+        else:
+            messages.insert(0, system_message)
         main_chat_update = []
 
     # First iteration and need to create the list and spawn workers
     # The LLM sees update_todo_list as a tool schema, but we handle execution ourselves.
     if not todo_list_exists:
-        tools = [TodoList, ConductResearch, AddSubTopic]
+        tools = [TodoList, ConductResearchBatch, AddSubTopicBatch]
     else:
-        tools = [ConductResearch, AddSubTopic]
+        tools = [ConductResearchBatch, AddSubTopicBatch]
 
     # invoke the LLM
     # gpt-4.1: strongest available planner for decomposing the ResearchBrief
     # and orchestrating workers. Called only ~5-10 times per run, so cost is fine.
     model = init_chat_model(
-        model="gpt-5-nano", model_provider="openai", reasoning_effort="high"
+        model="o3-mini", model_provider="openai", reasoning_effort="high"
     )
     llm_with_tools = model.bind_tools(tools)
     response = await llm_with_tools.ainvoke(messages)
@@ -308,127 +315,6 @@ async def supervisor(
         )
 
 
-# --- Supervisor Tools Helpers ---
-# These keep supervisor_tools() readable by extracting each responsibility.
-
-
-def _handle_todo_updates(
-    todo_update_calls: list[dict],
-    run_root: Path,
-    todo_path: str | None,
-) -> tuple[str | None, list[ToolMessage]]:
-    """Process update_todo_list tool calls: parse, write JSON, return messages.
-
-    Args:
-        todo_update_calls: List of tool call dicts with name == "TodoList".
-        run_root: Thread-scoped VFS root directory.
-        todo_path: Current todo_list_path from state (may be None on first call).
-
-    Returns:
-        Tuple of (updated_todo_path, list_of_ToolMessages).
-    """
-    messages: list[ToolMessage] = []
-    for tc in todo_update_calls:
-        todo_data = TodoList(**tc["args"])
-        actual_path = run_root / "todo_list.json"
-        write_todo_list(todo_data, actual_path)
-        todo_path = str(actual_path)
-        messages.append(
-            ToolMessage(
-                content=f"Todo list updated at {actual_path}.",
-                tool_call_id=tc["id"],
-            )
-        )
-    return todo_path, messages
-
-
-def _handle_subtopic_additions(
-    add_subtopic_calls: list[dict],
-    todo_path: str | None,
-) -> list[ToolMessage]:
-    """Append new sub-topics to the existing TodoList on disk.
-
-    Args:
-        add_subtopic_calls: List of tool call dicts with name == "AddSubTopic".
-        todo_path: Path to the current todo_list.json.
-
-    Returns:
-        List of ToolMessages confirming each addition.
-    """
-    messages: list[ToolMessage] = []
-    if not add_subtopic_calls or not todo_path or not Path(todo_path).exists():
-        return messages
-
-    todo = TodoList.model_validate_json(Path(todo_path).read_text())
-    for tc in add_subtopic_calls:
-        args = tc["args"]
-        todo.tasks.append(args["new_sub_topic"])
-        messages.append(
-            ToolMessage(
-                content=f"Added sub-topic: '{args['new_sub_topic']}' — Reason: {args['rationale']}",
-                tool_call_id=tc["id"],
-            )
-        )
-    Path(todo_path).write_text(todo.model_dump_json(indent=2))
-    return messages
-
-
-def _mark_tasks_completed(
-    completed_sub_topics: list[str],
-    todo_path: str | None,
-) -> None:
-    """Mark completed worker tasks in the TodoList JSON based on sub-topics.
-
-    This uses a robust comparison to handle LLM paraphrasing or punctuation changes.
-    """
-    if not completed_sub_topics or not todo_path or not Path(todo_path).exists():
-        return
-
-    todo = TodoList.model_validate_json(Path(todo_path).read_text())
-    pending_tasks = list(todo.tasks)
-
-    for topic_str in completed_sub_topics:
-        # 1. Normalize the worker's topic string
-        target = topic_str.strip().strip(".'\"").lower()
-
-        # 2. Try to find the best match in the pending list
-        best_match = None
-        best_score = 0.0
-
-        for task in pending_tasks:
-            # Normalize candidate
-            candidate = task.strip().strip(".'\"").lower()
-
-            # Exact match (normalized)
-            if candidate == target:
-                best_match = task
-                break
-
-            # Very close match (substring or subset of words)
-            # This handles the case where the LLM uses a partial name
-            target_words = set(target.split())
-            candidate_words = set(candidate.split())
-
-            # Use Jaccard similarity of words as a simple robust metric
-            if not target_words or not candidate_words:
-                continue
-            intersection = target_words.intersection(candidate_words)
-            union = target_words.union(candidate_words)
-            score = len(intersection) / len(union)
-
-            if score > 0.6 and score > best_score:
-                best_match = task
-                best_score = score
-
-        if best_match:
-            todo.tasks.remove(best_match)
-            todo.completed_tasks.append(best_match)
-            # Avoid matching the same task twice if possible
-            pending_tasks.remove(best_match)
-
-    Path(todo_path).write_text(todo.model_dump_json(indent=2))
-
-
 # --- Supervisor Tools Node ---
 
 
@@ -442,10 +328,11 @@ async def supervisor_tools(
     tool_calls = last_ai_message.tool_calls
 
     # Bin the tool calls by type so we can handle each category differently
-    conduct_research_calls = [
-        tc for tc in tool_calls if tc["name"] == "ConductResearch"
+    # Bin the tool calls by type
+    batch_research_calls = [
+        tc for tc in tool_calls if tc["name"] == "ConductResearchBatch"
     ]
-    add_subtopic_calls = [tc for tc in tool_calls if tc["name"] == "AddSubTopic"]
+    add_subtopic_calls = [tc for tc in tool_calls if tc["name"] == "AddSubTopicBatch"]
     todo_update_calls = [tc for tc in tool_calls if tc["name"] == "TodoList"]
 
     # Extract the thread-specific run root
@@ -456,35 +343,64 @@ async def supervisor_tools(
     findings_paths = list(state.get("findings_paths") or [])
     todo_path = state.get("todo_list_path")
 
-    # 1. Handle TodoList updates (must be first for the initial iteration)
-    todo_path, todo_msgs = _handle_todo_updates(todo_update_calls, run_root, todo_path)
+    # 1. Handle TodoList updates
+    todo_path, todo_msgs = handle_todo_updates(todo_update_calls, run_root, todo_path)
 
     # 2. Handle AddSubTopic calls
-    subtopic_msgs = _handle_subtopic_additions(add_subtopic_calls, todo_path)
+    subtopic_msgs = handle_subtopic_additions(add_subtopic_calls, todo_path)
 
-    # 3. Dispatch workers
-    # Limit to MAX_CONCURRENT_WORKERS; defer remaining calls to next round
-    capped_tasks = conduct_research_calls[:MAX_CONCURRENT_WORKERS]
-    deferred_tasks = conduct_research_calls[MAX_CONCURRENT_WORKERS:]
+    # 3. Flatten and Dispatch Workers from ConductResearchBatch
+    # We collect ALL tasks from all batch calls, then cap them.
+    all_task_items = []
+    for bc in batch_research_calls:
+        for t_args in bc["args"]["tasks"]:
+            all_task_items.append({"args": t_args, "batch_id": bc["id"]})
 
-    # Set up VFS directories for capped tasks
-    for tc in capped_tasks:
-        vfs_dir = run_root / tc["args"]["output_dirname"]
+    capped_tasks = all_task_items[:MAX_CONCURRENT_WORKERS]
+    deferred_tasks = all_task_items[MAX_CONCURRENT_WORKERS:]
+
+    # Setup variables for workers
+    worker_inputs = []
+    if todo_path and Path(todo_path).exists():
+        todo = TodoList.model_validate_json(Path(todo_path).read_text())
+    else:
+        todo = None
+
+    for item in capped_tasks:
+        args = item["args"]
+        vfs_dir = run_root / args["output_dirname"]
         vfs_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build the list of awaitables — call .ainvoke() directly like open-deep-research
+        task_id = args["task_id"]
+        sub_topic = f"Task ID {task_id}"
+        if todo:
+            for t in todo.tasks:
+                if t.id == task_id:
+                    sub_topic = t.task
+                    break
+
+        worker_inputs.append(
+            {"task_id": task_id, "sub_topic": sub_topic, "args": args, "batch_id": item["batch_id"]}
+        )
+
+    # Build the list of awaitables
     research_coroutines = [
         worker_subgraph.ainvoke(
             {
                 "brief": state["brief"],
                 "run_root": str(run_root),
-                "output_dirname": tc["args"]["output_dirname"],
+                "output_dirname": item["args"]["output_dirname"],
                 "researcher_messages": [
                     SystemMessage(content=RESEARCHER_PROMPT),
                     HumanMessage(
                         content=(
-                            f"Sub-topic to research: {tc['args']['sub_topic']}\n"
-                            f"Additional context: {tc['args'].get('context') or 'None'}\n\n"
+                            f"## OVERARCHING PROJECT CONTEXT\n"
+                            f"**Project Topic:** {state['brief'].topic}\n"
+                            f"**Main Objective:** {state['brief'].main_objective}\n\n"
+                            f"--- \n\n"
+                            f"## YOUR SPECIFIC TASK\n"
+                            f"**Sub-topic to research:** {item['sub_topic']}\n"
+                            f"**Additional context:** {item['args'].get('context') or 'None'}\n\n"
                             f"1. Run 2-3 targeted searches.\n"
                             f"2. Write your distilled findings to 'compressed_summary.md' using the write_file tool.\n"
                             f"Do NOT finish until you have written your summary file."
@@ -494,52 +410,55 @@ async def supervisor_tools(
             },
             config=config,
         )
-        for tc in capped_tasks
+        for item in worker_inputs
     ]
 
-    # Run them all concurrently. gather() preserves the order!
+    # Run them all concurrently
     results = await asyncio.gather(*research_coroutines, return_exceptions=True)
 
     # 4. Process results & Mark completed topics
-    worker_msgs: list[ToolMessage] = []
-    completed_topics: list[str] = []
-    for tc, result in zip(capped_tasks, results):
-        args = tc["args"]
-        topic = args["sub_topic"]
+    # We aggregate outcomes by batch_id
+    batch_outcomes: dict[str, list[str]] = {bc["id"]: [] for bc in batch_research_calls}
+    completed_task_ids: list[int] = []
+
+    for item, result in zip(worker_inputs, results):
+        task_id = item["task_id"]
+        sub_topic = item["sub_topic"]
+        batch_id = item["batch_id"]
+
         if isinstance(result, Exception):
-            worker_msgs.append(
-                ToolMessage(
-                    content=f"Worker failed on '{topic}': {result!s}",
-                    tool_call_id=tc["id"],
-                )
+            batch_outcomes[batch_id].append(
+                f"Task {task_id} FAILED: {result!s}"
             )
             continue
 
-        # Worker succeeded. We provide a minimal confirmation in history.
-        # The full summary is accessible via the research findings summary.
-        worker_msgs.append(
-            ToolMessage(
-                content=f"Worker completed: '{topic}'. Findings saved to VFS.",
-                tool_call_id=tc["id"],
-            )
+        batch_outcomes[batch_id].append(
+            f"Task {task_id} COMPLETED: {sub_topic[:40]}..."
         )
-        completed_topics.append(topic)
-        findings_paths.append(str(run_root / args["output_dirname"]))
+        completed_task_ids.append(task_id)
+        findings_paths.append(str(run_root / item["args"]["output_dirname"]))
 
-    # 5. Deferred task messages
-    deferred_msgs = [
-        ToolMessage(
-            content=f"Deferred: '{tc['args']['sub_topic']}' — worker limit reached, will dispatch next iteration.",
-            tool_call_id=tc["id"],
+    # Add deferred tasks to the outcomes
+    for item in deferred_tasks:
+        batch_id = item["batch_id"]
+        batch_outcomes[batch_id].append(
+            f"Task {item['args']['task_id']} DEFERRED (worker limit reached)."
         )
-        for tc in deferred_tasks
+
+    # Build ToolMessages for the batches
+    batch_msgs = [
+        ToolMessage(
+            content="\n".join(outcomes) or "No tasks processed in this batch.",
+            tool_call_id=bid,
+        )
+        for bid, outcomes in batch_outcomes.items()
     ]
 
     # 6. Mark successful tasks in the TodoList
-    _mark_tasks_completed(completed_topics, todo_path)
+    mark_tasks_completed(completed_task_ids, todo_path)
 
     # Combine all tool messages in order
-    all_tool_messages = todo_msgs + subtopic_msgs + worker_msgs + deferred_msgs
+    all_tool_messages = todo_msgs + subtopic_msgs + batch_msgs
 
     return Command(
         goto="supervisor",
@@ -699,9 +618,16 @@ async def generate_final_report(
             pass
 
     # 1b. Format user messages (language matching)
-    user_inputs = [
-        msg.content for msg in state["messages"] if isinstance(msg, HumanMessage)
-    ]
+    # Filter out short boilerplate messages like "approve", "yes", etc.
+    approval_keywords = {"approve", "approved", "yes", "correct", "looks good", "agree"}
+    user_inputs = []
+    for msg in state["messages"]:
+        if isinstance(msg, HumanMessage) and isinstance(msg.content, str):
+            content = msg.content.strip().lower()
+            # Only include if it's not a simple approval or if it's longer than a few words
+            if content not in approval_keywords or len(content.split()) > 3:
+                user_inputs.append(msg.content)
+
     user_messages_str = (
         "\n".join(user_inputs) if user_inputs else "(No initial context provided.)"
     )
@@ -720,9 +646,9 @@ async def generate_final_report(
 
     # 3. Initialize Model
     model = init_chat_model(
-        model="gpt-5-nano",
+        model="o3-mini",
         model_provider="openai",
-        reasoning_effort="high",
+        reasoning_effort="medium",
     )
 
     # 4. Invoke LLM with just the system prompt and a human message to kick it off
@@ -733,12 +659,18 @@ async def generate_final_report(
         ),
     ]
     response = await model.ainvoke(messages)
-    
+
     report_text = ""
     if isinstance(response.content, str):
         report_text = response.content
     elif isinstance(response.content, list):
-        report_text = " ".join([part["text"] for part in response.content if isinstance(part, dict) and part.get("type") == "text"])
+        report_text = " ".join(
+            [
+                part["text"]
+                for part in response.content
+                if isinstance(part, dict) and part.get("type") == "text"
+            ]
+        )
 
     # Save the final report to disk in the run directory
     try:

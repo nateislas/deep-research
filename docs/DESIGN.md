@@ -190,3 +190,9 @@ Right now, we're having the first node generate the research brief, and then pas
 # Report generation
 
 Tried to have tool calling, introduced problems
+
+# Supervisor spawning workers
+
+Kept having problems where the supervisor would only spawn a couple at a time instead of a large parallel search. Call the research stuff in batches
+
+Did the same for adding suptopics

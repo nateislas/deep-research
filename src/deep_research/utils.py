@@ -3,19 +3,26 @@
 import os
 from pathlib import Path
 
-from exa_py import Exa
-from langchain_community.agent_toolkits import FileManagementToolkit
-from langchain_core.tools import BaseTool, tool
+from langchain_core.messages import ToolMessage
 from pydantic import BaseModel, Field
 
 from deep_research.state import ResearchBrief
 
 
+class TaskItem(BaseModel):
+    """A single research task in the todo list."""
+
+    id: int = Field(description="The unique integer ID of the research task.")
+    task: str = Field(description="The description of the research task.")
+
+
 class TodoList(BaseModel):
     """The todo list for the research agent."""
 
-    tasks: list[str] = Field(description="The full updated list of research tasks.")
-    completed_tasks: list[str] = Field(default_factory=list)
+    tasks: list[TaskItem] = Field(
+        description="The full updated list of pending research tasks."
+    )
+    completed_tasks: list[TaskItem] = Field(default_factory=list)
 
 
 # Resolve RESEARCH_ROOT, allowing override from environment variable.
@@ -41,153 +48,105 @@ def write_todo_list(todo: TodoList, path: Path) -> None:
     path.write_text(todo.model_dump_json(indent=2))
 
 
-# --- Worker File Management Tools ---
+# --- Supervisor Tools Helpers ---
 
 
-def get_worker_filesystem_tools(worker_vfs_dir: str) -> list[BaseTool]:
-    """Get the file management tools scoped to a worker's VFS directory.
-
-    Args:
-        worker_vfs_dir: Absolute path to the worker's dedicated VFS directory.
-
-    Returns:
-        A list of tools with a protected write operation to preserve raw logs.
-    """
-    toolkit = FileManagementToolkit(
-        root_dir=worker_vfs_dir,
-        selected_tools=["write_file", "read_file", "list_directory"],
-    )
-    all_tools = toolkit.get_tools()
-
-    final_tools = []
-    for t in all_tools:
-        if t.name == "write_file":
-            # Wrap the write tool to protect raw_content.md
-            original_run = t._run
-            original_arun = t._arun
-
-            def protected_run(*args, **kwargs):
-                file_path = kwargs.get("file_path") or (args[0] if args else None)
-                if file_path and (file_path == "raw_content.md" or file_path.endswith("/raw_content.md")):
-                    return "ERROR: 'raw_content.md' is managed automatically by 'exa_search'. Manual writes are forbidden to prevent data loss. Please write your synthesis to 'compressed_summary.md' instead."
-                return original_run(*args, **kwargs)
-
-            async def protected_arun(*args, **kwargs):
-                file_path = kwargs.get("file_path") or (args[0] if args else None)
-                if file_path and (file_path == "raw_content.md" or file_path.endswith("/raw_content.md")):
-                    return "ERROR: 'raw_content.md' is managed automatically by 'exa_search'. Manual writes are forbidden to prevent data loss. Please write your synthesis to 'compressed_summary.md' instead."
-                return await original_arun(*args, **kwargs)
-
-            t._run = protected_run
-            t._arun = protected_arun
-            t.description = "Write a file to the VFS. NOTE: 'raw_content.md' is PROTECTED and cannot be written manually."
-
-        final_tools.append(t)
-
-    return final_tools
+def handle_todo_updates(
+    todo_update_calls: list[dict],
+    run_root: Path,
+    todo_path: str | None,
+) -> tuple[str | None, list[ToolMessage]]:
+    """Process update_todo_list tool calls: parse, write JSON, return messages."""
+    messages: list[ToolMessage] = []
+    for tc in todo_update_calls:
+        todo_data = TodoList(**tc["args"])
+        actual_path = run_root / "todo_list.json"
+        write_todo_list(todo_data, actual_path)
+        todo_path = str(actual_path)
+        messages.append(
+            ToolMessage(
+                content=f"Todo list updated at {actual_path}.",
+                tool_call_id=tc["id"],
+            )
+        )
+    return todo_path, messages
 
 
-# --- Search Tools ---
+def handle_subtopic_additions(
+    add_subtopic_calls: list[dict],
+    todo_path: str | None,
+) -> list[ToolMessage]:
+    """Append new sub-topics to the existing TodoList on disk."""
+    messages: list[ToolMessage] = []
+    if not add_subtopic_calls or not todo_path or not Path(todo_path).exists():
+        return messages
+
+    todo = TodoList.model_validate_json(Path(todo_path).read_text())
+
+    # Build a set of all existing tasks (pending and completed) for fast deduplication
+    existing_tasks_normalized = {
+        t.task.strip().lower() for t in todo.tasks + todo.completed_tasks
+    }
+
+    # Generate sequential IDs starting from the max existing ID
+    max_id = max([t.id for t in todo.tasks + todo.completed_tasks], default=0)
+
+    for bc in add_subtopic_calls:
+        batch_outcomes: list[str] = []
+        for topic_args in bc["args"]["topics"]:
+            new_topic = topic_args["new_sub_topic"]
+            new_topic_normalized = new_topic.strip().lower()
+
+            # Deduplication check
+            if new_topic_normalized in existing_tasks_normalized:
+                batch_outcomes.append(
+                    f"Skipped adding sub-topic: '{new_topic}' — Reason: Already exists in the todo list."
+                )
+                continue
+
+            max_id += 1
+            new_task = TaskItem(id=max_id, task=new_topic)
+            todo.tasks.append(new_task)
+            # Add to set to prevent deduplication within the same tool call or across calls
+            existing_tasks_normalized.add(new_topic_normalized)
+            batch_outcomes.append(
+                f"Added sub-topic: '{new_topic}' — Reason: {topic_args['rationale']} (ID {max_id})"
+            )
+
+        messages.append(
+            ToolMessage(
+                content="\n".join(batch_outcomes) or "No sub-topics added in this batch.",
+                tool_call_id=bc["id"],
+            )
+        )
+
+    # Save the updated todo list
+    Path(todo_path).write_text(todo.model_dump_json(indent=2))
+
+    return messages
 
 
-@tool
-def exa_search(
-    query: str,
-    search_type: str = "auto",
-    livecrawl: str = "fallback",
-    category: str | None = None,
-    start_published_date: str | None = None,
-    vfs_path: str | None = None,
-) -> str:
-    """Search the web using Exa's neural search engine.
+def mark_tasks_completed(
+    completed_task_ids: list[int],
+    todo_path: str | None,
+) -> None:
+    """Mark completed worker tasks in the TodoList JSON based on their integer IDs."""
+    if not completed_task_ids or not todo_path or not Path(todo_path).exists():
+        return
 
-    Use this tool to find information on any topic. Choose parameters
-    strategically to get the most relevant, up-to-date results.
+    todo = TodoList.model_validate_json(Path(todo_path).read_text())
 
-    Args:
-        query: Natural language search query. Be specific and descriptive.
-        search_type: Search strategy ('neural', 'keyword', 'auto').
-            - 'neural': best for concepts, intent, and semantic discovery.
-            - 'keyword': best for exact names, model numbers, or rare technical terms.
-            - 'auto': default; let Exa decide.
-        livecrawl: Whether to fetch fresh page content ('always', 'fallback', 'never').
-            Use 'always' for breaking news or very recent events.
-        category: Filter by source type. Options: 'news', 'research paper', 'company',
-            'pdf', 'github', 'tweet', 'blog post', 'personal site', 'social media'.
-        start_published_date: Only return results published AFTER this date (YYYY-MM-DD).
-            Use this to exclude outdated information in fast-moving fields.
-        vfs_path: (Internal) Path to automatically record raw results. Do not set this.
+    # We will iterate through pending tasks, and if the ID matches, move it to completed
+    tasks_to_keep = []
 
-    Returns:
-        Formatted string of search results with titles, URLs, and summaries.
-    """
-    exa = Exa(api_key=os.getenv("EXA_API_KEY"))
+    for task_item in todo.tasks:
+        if task_item.id in completed_task_ids:
+            todo.completed_tasks.append(task_item)
+        else:
+            tasks_to_keep.append(task_item)
 
-    results = exa.search_and_contents(
-        query,
-        num_results=8,
-        type=search_type,
-        livecrawl=livecrawl,
-        category=category,
-        start_published_date=start_published_date,
-        text={"max_characters": 8000},
-        highlights={"query": query, "num_sentences": 5},
-        summary={"query": query},
-    )
-
-    if not results.results:
-        return "No results found."
-
-    # 1. Generate the detailed version for disk (includes Full Text)
-    disk_parts = []
-    for i, r in enumerate(results.results, 1):
-        lines = [f"## Result {i}: {r.title or 'Untitled'}"]
-        lines.append(f"**URL**: {r.url}")
-        if r.published_date:
-            lines.append(f"**Published**: {r.published_date}")
-        if r.summary:
-            lines.append(f"\n### Summary\n{r.summary}")
-        if r.highlights:
-            lines.append("\n### Key Highlights")
-            for h in r.highlights:
-                lines.append(f"- {h.strip()}")
-        if r.text:
-            lines.append(f"\n### Full Text Excerpt\n{r.text}")
-        disk_parts.append("\n".join(lines))
-
-    # 2. Generate the lightweight version for the LLM (NO Full Text)
-    llm_parts = []
-    for i, r in enumerate(results.results, 1):
-        lines = [f"## Result {i}: {r.title or 'Untitled'}"]
-        lines.append(f"**URL**: {r.url}")
-        if r.published_date:
-            lines.append(f"**Published**: {r.published_date}")
-        if r.summary:
-            lines.append(f"\n### Summary\n{r.summary}")
-        if r.highlights:
-            lines.append("\n### Key Highlights")
-            for h in r.highlights:
-                lines.append(f"- {h.strip()}")
-        llm_parts.append("\n".join(lines))
-
-    # Record to disk if path is provided (Comprehensive)
-    if vfs_path:
-        path = Path(vfs_path) / "raw_content.md"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(f"\n\n# Search: {query}\n\n" + "\n\n---\n\n".join(disk_parts))
-
-    # Return to LLM (Lightweight)
-    return "\n\n---\n\n".join(llm_parts)
-
-
-def get_search_tools() -> list[BaseTool]:
-    """Get the Exa search tool for the research worker.
-
-    Returns:
-        A list containing the custom exa_search tool.
-    """
-    return [exa_search]
+    todo.tasks = tasks_to_keep
+    Path(todo_path).write_text(todo.model_dump_json(indent=2))
 
 
 # --- Prompt Formatting Helpers ---
@@ -220,10 +179,10 @@ def todo_to_string(todo: TodoList) -> str:
         A string with pending tasks marked [ ] and completed tasks marked [x].
     """
     lines = []
-    for task in todo.tasks:
-        lines.append(f"[ ] {task}")
-    for task in todo.completed_tasks:
-        lines.append(f"[x] {task}")
+    for t in todo.tasks:
+        lines.append(f"[ ] ID {t.id}: {t.task}")
+    for t in todo.completed_tasks:
+        lines.append(f"[x] ID {t.id}: {t.task}")
     return "\n".join(lines) if lines else "No tasks in list."
 
 
@@ -233,25 +192,77 @@ def get_findings_summary(vfs_root: Path) -> str:
         return "No findings yet."
 
     summaries = []
+    all_leads = []
+
     # Identify subdirectories (worker assignments) that have a summary
-    # We glob for all summaries in the current run root
     for summary_path in sorted(vfs_root.glob("**/compressed_summary.md")):
         try:
             content = summary_path.read_text(encoding="utf-8").strip()
+
+            # Extract Promising Leads for the consolidated section
+            # Look for headers like "Promising Leads", "Follow-ups", etc.
+            lower_content = content.lower()
+            lead_markers = [
+                "## promising leads",
+                "## follow-up",
+                "## leads for expansion",
+            ]
+
+            found_marker = None
+            for marker in lead_markers:
+                if marker in lower_content:
+                    found_marker = marker
+                    break
+
+            if found_marker:
+                # Find start and end of section
+                start_idx = lower_content.find(found_marker)
+                # Split original content to preserve formatting
+                leads_part = content[start_idx:]
+                # Header is everything on the first line
+                lines = leads_part.split("\n")
+                if len(lines) > 1:
+                    # Body is everything after the header line until the next header
+                    body_lines = []
+                    for line in lines[1:]:
+                        if line.startswith("##"):
+                            break
+                        body_lines.append(line)
+
+                    leads_raw = "\n".join(body_lines).strip()
+                    if leads_raw:
+                        topic_name = summary_path.parent.name.replace("_", " ").title()
+                        all_leads.append(f"### Leads from {topic_name}:\n{leads_raw}")
+
             # Character limit guard to prevent prompt overflow
             if len(content) > 4000:
                 content = content[:4000] + "... [Truncated]"
-            
+
             # Format as a clean section for the summary
             topic_dir = summary_path.parent.name
             topic_title = topic_dir.replace("_", " ").title()
-            summaries.append(f"### Finding: {topic_title}\n**DirectoryID: {topic_dir}**\n{content}\n")
+            summaries.append(
+                f"### Finding: {topic_title}\n**DirectoryID: {topic_dir}**\n{content}\n"
+            )
         except Exception as e:
-            summaries.append(f"### Finding: {summary_path.parent.name}\n(Error reading summary: {e})\n")
+            summaries.append(
+                f"### Finding: {summary_path.parent.name}\n(Error reading summary: {e})\n"
+            )
 
     if not summaries:
         return "No research results found in VFS yet."
 
-    return "\n---\n".join(summaries)
+    main_findings = "\n---\n".join(summaries)
 
+    if all_leads:
+        leads_ledger = "\n\n".join(all_leads)
+        return (
+            f"{main_findings}\n\n"
+            "--- \n\n"
+            "## CONSOLIDATED LEADS FOR EXPANSION\n"
+            "The following leads were proposed by workers for further investigation. "
+            "Evaluate these against the Main Objective and use AddSubTopic to follow the most promising ones:\n\n"
+            f"{leads_ledger}"
+        )
 
+    return main_findings
