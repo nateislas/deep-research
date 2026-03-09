@@ -7,6 +7,7 @@ supervision, and research tasks, and connecting them with appropriate routing.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import re
 from pathlib import Path
 from typing import Literal
@@ -23,6 +24,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
 from deep_research.prompts import (
+    REPORT_SYNTHESIS_PROMPT,
     RESEARCH_INTAKE_PROMPT,
     RESEARCHER_PROMPT,
     SUPERVISOR_PROMPT,
@@ -100,6 +102,11 @@ async def research_intake(
             update={
                 "brief": updated_brief,
                 "todo_list_path": state.get("todo_list_path"),
+                "messages": [
+                    AIMessage(
+                        content=f"Research Brief Approved. Starting deep research phase for: *{updated_brief.topic}*."
+                    )
+                ],
                 "supervisor_messages": [],  # Explicitly initialize supervisor history
                 "active_tasks": [],  # Explicitly initialize task list
                 "iteration_count": 0,  # Initialize loop counter
@@ -228,8 +235,16 @@ async def supervisor(
             )
         )
         messages = [system_message]
+
+        # Also notify the user in the main chat
+        main_chat_update = [
+            AIMessage(
+                content="Supervisor is analyzing the research brief and preparing the initial task list..."
+            )
+        ]
     else:
         messages = state["supervisor_messages"]
+        main_chat_update = []
 
     # First iteration and need to create the list and spawn workers
     # The LLM sees update_todo_list as a tool schema, but we handle execution ourselves.
@@ -241,7 +256,9 @@ async def supervisor(
     # invoke the LLM
     # gpt-4.1: strongest available planner for decomposing the ResearchBrief
     # and orchestrating workers. Called only ~5-10 times per run, so cost is fine.
-    model = init_chat_model(model="gpt-4.1", model_provider="openai")
+    model = init_chat_model(
+        model="gpt-5-nano", model_provider="openai", reasoning_effort="high"
+    )
     llm_with_tools = model.bind_tools(tools)
     response = await llm_with_tools.ainvoke(messages)
 
@@ -251,6 +268,7 @@ async def supervisor(
             goto="supervisor_tools",
             update={
                 "supervisor_messages": [response],
+                "messages": main_chat_update,
                 "iteration_count": iter_count + 1,
             },
         )
@@ -279,7 +297,14 @@ async def supervisor(
         # All tasks complete — LLM correctly determined research is done
         return Command(
             goto=END,
-            update={"supervisor_messages": [response]},
+            update={
+                "supervisor_messages": [response],
+                "messages": [
+                    AIMessage(
+                        content="Research complete. I have gathered all necessary data from the workers. Now, I am synthesizing everything into a detailed final report..."
+                    )
+                ],
+            },
         )
 
 
@@ -354,22 +379,53 @@ def _mark_tasks_completed(
 ) -> None:
     """Mark completed worker tasks in the TodoList JSON based on sub-topics.
 
-    Args:
-        completed_sub_topics: The list of raw sub-topic strings that finished research.
-        todo_path: Path to the current todo_list.json.
+    This uses a robust comparison to handle LLM paraphrasing or punctuation changes.
     """
     if not completed_sub_topics or not todo_path or not Path(todo_path).exists():
         return
 
     todo = TodoList.model_validate_json(Path(todo_path).read_text())
+    pending_tasks = list(todo.tasks)
+
     for topic_str in completed_sub_topics:
-        completed = topic_str.strip().lower()
-        # Create a copy of tasks to iterate over while potentially modifying the original list
-        for task in list(todo.tasks):
-            if task.strip().lower() == completed:
-                todo.tasks.remove(task)
-                todo.completed_tasks.append(task)
-                break  # One match per completed topic
+        # 1. Normalize the worker's topic string
+        target = topic_str.strip().strip(".'\"").lower()
+
+        # 2. Try to find the best match in the pending list
+        best_match = None
+        best_score = 0.0
+
+        for task in pending_tasks:
+            # Normalize candidate
+            candidate = task.strip().strip(".'\"").lower()
+
+            # Exact match (normalized)
+            if candidate == target:
+                best_match = task
+                break
+
+            # Very close match (substring or subset of words)
+            # This handles the case where the LLM uses a partial name
+            target_words = set(target.split())
+            candidate_words = set(candidate.split())
+
+            # Use Jaccard similarity of words as a simple robust metric
+            if not target_words or not candidate_words:
+                continue
+            intersection = target_words.intersection(candidate_words)
+            union = target_words.union(candidate_words)
+            score = len(intersection) / len(union)
+
+            if score > 0.6 and score > best_score:
+                best_match = task
+                best_score = score
+
+        if best_match:
+            todo.tasks.remove(best_match)
+            todo.completed_tasks.append(best_match)
+            # Avoid matching the same task twice if possible
+            pending_tasks.remove(best_match)
+
     Path(todo_path).write_text(todo.model_dump_json(indent=2))
 
 
@@ -435,7 +491,8 @@ async def supervisor_tools(
                         )
                     ),
                 ],
-            }
+            },
+            config=config,
         )
         for tc in capped_tasks
     ]
@@ -457,9 +514,9 @@ async def supervisor_tools(
                 )
             )
             continue
-        
+
         # Worker succeeded. We provide a minimal confirmation in history.
-        # The full summary is accessible via the Research Ledger.
+        # The full summary is accessible via the research findings summary.
         worker_msgs.append(
             ToolMessage(
                 content=f"Worker completed: '{topic}'. Findings saved to VFS.",
@@ -559,7 +616,8 @@ async def worker_tools(
     worker_dir = str(Path(state["run_root"]) / state["output_dirname"])
 
     tools_map = {
-        t.name: t for t in (get_search_tools() + get_worker_filesystem_tools(worker_dir))
+        t.name: t
+        for t in (get_search_tools() + get_worker_filesystem_tools(worker_dir))
     }
 
     tool_messages = []
@@ -572,7 +630,24 @@ async def worker_tools(
             # work with StructuredTool's _arun dispatch path.
             if tc["name"] == "exa_search":
                 args["vfs_path"] = worker_dir
-            result = await tool.ainvoke(args)
+
+            # Retry transient failures (e.g. rate limits, timeouts) up to 2 times.
+            max_attempts = 3
+            last_error: Exception | None = None
+            result = None
+            for attempt in range(max_attempts):
+                try:
+                    result = await tool.ainvoke(args)
+                    last_error = None
+                    break
+                except Exception as e:
+                    last_error = e
+                    if attempt < max_attempts - 1:
+                        await asyncio.sleep(3 * (attempt + 1))  # 3s, then 6s
+
+            if last_error is not None:
+                result = f"Tool error after {max_attempts} attempts: {last_error!s}"
+
             tool_messages.append(
                 ToolMessage(content=str(result), tool_call_id=tc["id"])
             )
@@ -597,13 +672,92 @@ worker_builder.add_edge(START, "worker")
 worker_subgraph = worker_builder.compile()
 
 
+# --- Report Synthesis ---
+
+
 async def generate_final_report(
     state: GlobalState,
     config: RunnableConfig,
 ) -> Command[Literal[END]]:
     """Synthesize all compressed findings into a final report."""
-    # TODO: Implement report synthesis based on VFS content
-    return Command(goto=END, update={"final_report": "Report content..."})
+    # 1. Prepare data
+    thread_id = config["configurable"].get("thread_id", "default")
+    run_root = RESEARCH_ROOT / thread_id
+    brief = state["brief"]
+    findings_summary = get_findings_summary(run_root)
+
+    # 1a. Load the todo list for extra context
+    todo_path = run_root / "todo_list.json"
+    completed_tasks_str = "No tasks completed yet."
+    if todo_path.exists():
+        try:
+            todo = TodoList.model_validate_json(todo_path.read_text())
+            completed_tasks_str = "\n".join(
+                [f"- [x] {t}" for t in todo.completed_tasks]
+            )
+        except Exception:
+            pass
+
+    # 1b. Format user messages (language matching)
+    user_inputs = [
+        msg.content for msg in state["messages"] if isinstance(msg, HumanMessage)
+    ]
+    user_messages_str = (
+        "\n".join(user_inputs) if user_inputs else "(No initial context provided.)"
+    )
+
+    # 2. Format the system prompt
+    system_prompt = REPORT_SYNTHESIS_PROMPT.format(
+        date=datetime.date.today().strftime("%B %d, %Y"),
+        user_messages=user_messages_str,
+        topic=brief.topic,
+        main_objective=brief.main_objective,
+        scope=brief.scope,
+        sub_objectives="\n".join([f"- {obj}" for obj in brief.sub_objectives]),
+        completed_tasks=completed_tasks_str,
+        findings_summary=findings_summary,
+    )
+
+    # 3. Initialize Model
+    model = init_chat_model(
+        model="gpt-5-nano",
+        model_provider="openai",
+        reasoning_effort="high",
+    )
+
+    # 4. Invoke LLM with just the system prompt and a human message to kick it off
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(
+            content="Begin writing the comprehensive final report now based on the provided research findings. Do not provide a conversational opening."
+        ),
+    ]
+    response = await model.ainvoke(messages)
+    
+    report_text = ""
+    if isinstance(response.content, str):
+        report_text = response.content
+    elif isinstance(response.content, list):
+        report_text = " ".join([part["text"] for part in response.content if isinstance(part, dict) and part.get("type") == "text"])
+
+    # Save the final report to disk in the run directory
+    try:
+        report_file = run_root / "final_report.md"
+        report_file.write_text(report_text, encoding="utf-8")
+    except Exception:
+        pass
+
+    return Command(
+        goto=END,
+        update={
+            "final_report": report_text,
+            "messages": [
+                AIMessage(
+                    content="Final Research Report Generation Complete. You can read it below."
+                )
+            ],
+        },
+    )
 
 
 # --- Main Graph Construction ---

@@ -18,9 +18,10 @@ class TodoList(BaseModel):
     completed_tasks: list[str] = Field(default_factory=list)
 
 
-# Resolve RESEARCH_ROOT relative to this file to avoid hardcoded absolute paths.
-# utils.py lives at src/deep_research/utils.py, so .parent.parent.parent = project root.
-RESEARCH_ROOT = Path(__file__).parent.parent.parent / "vfs"
+# Resolve RESEARCH_ROOT, allowing override from environment variable.
+# Default is project root / "vfs"
+DEFAULT_VFS_PATH = Path(__file__).parent.parent.parent / "vfs"
+RESEARCH_ROOT = Path(os.getenv("RESEARCH_VFS_PATH", str(DEFAULT_VFS_PATH)))
 
 
 # --- Todo List Helpers ---
@@ -92,15 +93,10 @@ def get_worker_filesystem_tools(worker_vfs_dir: str) -> list[BaseTool]:
 @tool
 def exa_search(
     query: str,
-    num_results: int = 8,
     search_type: str = "auto",
     livecrawl: str = "fallback",
     category: str | None = None,
     start_published_date: str | None = None,
-    end_published_date: str | None = None,
-    include_domains: list[str] | None = None,
-    exclude_domains: list[str] | None = None,
-    max_characters: int = 8000,
     vfs_path: str | None = None,
 ) -> str:
     """Search the web using Exa's neural search engine.
@@ -110,19 +106,17 @@ def exa_search(
 
     Args:
         query: Natural language search query. Be specific and descriptive.
-        num_results: Number of results to return (1-20). Default 8.
         search_type: Search strategy ('neural', 'keyword', 'auto').
-            Neural is best for semantics; keyword is best for exact names/terms.
-        livecrawl: Fetch the latest page content ('always', 'fallback', 'never').
-            Use 'always' for very recent news or earnings reports.
-        category: Filter by source type. Options: 'company', 'news', 'research paper',
+            - 'neural': best for concepts, intent, and semantic discovery.
+            - 'keyword': best for exact names, model numbers, or rare technical terms.
+            - 'auto': default; let Exa decide.
+        livecrawl: Whether to fetch fresh page content ('always', 'fallback', 'never').
+            Use 'always' for breaking news or very recent events.
+        category: Filter by source type. Options: 'news', 'research paper', 'company',
             'pdf', 'github', 'tweet', 'blog post', 'personal site', 'social media'.
-        start_published_date: Filter results published AFTER this date (YYYY-MM-DD).
-        end_published_date: Filter results published BEFORE this date (YYYY-MM-DD).
-        include_domains: List of domains to LIMIT the search to (e.g., ['nature.com']).
-        exclude_domains: List of domains to REMOVE from the results (e.g., ['reddit.com']).
-        max_characters: Max chars per result (1000-15000). Default 8000.
-        vfs_path: (Internal) Path to automatically record raw results.
+        start_published_date: Only return results published AFTER this date (YYYY-MM-DD).
+            Use this to exclude outdated information in fast-moving fields.
+        vfs_path: (Internal) Path to automatically record raw results. Do not set this.
 
     Returns:
         Formatted string of search results with titles, URLs, and summaries.
@@ -131,15 +125,12 @@ def exa_search(
 
     results = exa.search_and_contents(
         query,
-        num_results=num_results,
+        num_results=8,
         type=search_type,
         livecrawl=livecrawl,
         category=category,
         start_published_date=start_published_date,
-        end_published_date=end_published_date,
-        include_domains=include_domains,
-        exclude_domains=exclude_domains,
-        text={"max_characters": max_characters},
+        text={"max_characters": 8000},
         highlights={"query": query, "num_sentences": 5},
         summary={"query": query},
     )
@@ -237,7 +228,7 @@ def todo_to_string(todo: TodoList) -> str:
 
 
 def get_findings_summary(vfs_root: Path) -> str:
-    """Read all findings and aggregate their compressed_summary.md contents into a ledger."""
+    """Read all findings and aggregate their compressed_summary.md contents into a single research summary."""
     if not vfs_root.exists():
         return "No findings yet."
 
@@ -248,12 +239,13 @@ def get_findings_summary(vfs_root: Path) -> str:
         try:
             content = summary_path.read_text(encoding="utf-8").strip()
             # Character limit guard to prevent prompt overflow
-            if len(content) > 2000:
-                content = content[:2000] + "... [Truncated]"
+            if len(content) > 4000:
+                content = content[:4000] + "... [Truncated]"
             
-            # Format as a clean section for the ledger
-            topic_name = summary_path.parent.name.replace("_", " ").title()
-            summaries.append(f"### Finding: {topic_name}\n{content}\n")
+            # Format as a clean section for the summary
+            topic_dir = summary_path.parent.name
+            topic_title = topic_dir.replace("_", " ").title()
+            summaries.append(f"### Finding: {topic_title}\n**DirectoryID: {topic_dir}**\n{content}\n")
         except Exception as e:
             summaries.append(f"### Finding: {summary_path.parent.name}\n(Error reading summary: {e})\n")
 
@@ -261,3 +253,5 @@ def get_findings_summary(vfs_root: Path) -> str:
         return "No research results found in VFS yet."
 
     return "\n---\n".join(summaries)
+
+

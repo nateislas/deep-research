@@ -142,3 +142,5 @@ class WorkerState(TypedDict):
     # Every worker needs its own message history for its search loop
     # Renamed to researcher_messages so it can be isolated from the supervisor_messages
     researcher_messages: Annotated[list[AnyMessage], add_messages]
+
+
