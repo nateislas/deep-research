@@ -13,46 +13,62 @@ from pydantic import BaseModel, Field
 from typing_extensions import NotRequired, TypedDict
 
 
-# Structured data
-class ConductResearch(BaseModel):
-    """Dispatch a research worker to investigate a specific sub-topic.
+# =========================== Structured data ===========================
+class ResearchTask(BaseModel):
+    """An individual research task to be performed by a worker."""
 
-    The worker will autonomously decide which Exa search queries to run
-    and how many iterations to perform. You provide the what, not the how.
-    """
-
-    sub_topic: str = Field(
-        description="The specific sub-topic or research question for the worker to investigate. Be precise and focused."
+    task_id: int = Field(
+        description="The integer ID of the specific pending task from the Todo List."
     )
     context: str = Field(
         default="",
         description=(
-            "Optional strategic context for the worker. E.g., 'A previous worker found X — "
-            "dig deeper into Y' or 'Focus only on post-2022 data'. Leave empty if no special "
-            "direction is needed."
+            "Optional strategic context or constraints to guide the worker's search "
+            "and synthesis based on prior findings or specific requirements."
         ),
     )
     output_dirname: str = Field(
         description=(
-            "The VFS directory name where the worker saves its findings. Use snake_case and be "
-            "descriptive (e.g., 'floating_offshore_wind_lcoe'). Worker will create "
-            "raw_content.md and compressed_summary.md inside this directory."
-        )
+            "The VFS directory name where the worker saves its findings. Use snake_case."
+        ),
+        pattern=r"^[a-z0-9_]+$",
     )
 
 
-class AddSubTopic(BaseModel):
-    """Add a new sub-topic to the research todo list.
+class ConductResearchBatch(BaseModel):
+    """Dispatch MULTIPLE research workers simultaneously to investigate sub-topics.
 
-    Use this when worker findings reveal an important angle that the original
-    ResearchBrief did not anticipate.
+    The workers will autonomously decide which Exa search queries to run.
+    You MUST include every pending task from the Todo List up to the max parallel limit.
     """
 
+    tasks: list[ResearchTask] = Field(
+        description="A list of pending research tasks to dispatch to workers.",
+        min_length=1,
+    )
+
+
+class NewSubTopic(BaseModel):
+    """A new sub-topic to be added to the research plan."""
+
     new_sub_topic: str = Field(
-        description="The new sub-topic to add to the research plan."
+        description="A clear, human-readable description of the new research direction or thematic component."
     )
     rationale: str = Field(
         description="Why this sub-topic is worth investigating. Cite the worker finding that surfaced it."
+    )
+
+
+class AddSubTopicBatch(BaseModel):
+    """Add MULTIPLE new sub-topics to the research todo list simultaneously.
+
+    Use this when worker findings reveal important angles that the original
+    ResearchBrief did not anticipate.
+    """
+
+    topics: list[NewSubTopic] = Field(
+        description="A list of new sub-topics to add to the research plan.",
+        min_length=1,
     )
 
 
@@ -60,24 +76,24 @@ class ResearchBrief(BaseModel):
     """The research brief for the deep research agent."""
 
     topic: str = Field(
-        description="A concise headline and summary of the research subject."
+        description="A clear, multi-sentence summary of the research subject. Must be at least 2-3 sentences providing context on why this topic matters."
     )
     main_objective: str = Field(
-        description="The primary goal of the research. Define if the output should be exploratory (broad discovery) or confirmatory (validating a specific hypothesis)."
+        description="The primary goal of the research. What specific overarching question are we trying to answer?"
     )
     scope: str = Field(
-        description="The boundaries of the search. Define what is explicitly included and what is excluded (e.g., timeline, geography, or specific industries)."
+        description="The formal search boundaries. Define the specific parameters for inclusion and exclusion."
     )
     sub_objectives: list[str] = Field(
-        description="A list of 5-15 granular, independent research questions. Each should be distinct enough to be handled by a separate sub-agent without overlapping with others.",
-        min_items=5,
-        max_items=15,
+        description="A list of 4-6 foundational, actionable search directives. These must be empirical and searchable categories of information. Do not include methodological instructions.",
+        min_length=4,
+        max_length=6,
     )
 
     brief_status: Literal["pending", "approved", "proposed"] = Field(default="pending")
 
 
-# States
+# =========================== States ===========================
 
 
 # Using TypedDict for state because it allows for flexible updates without
@@ -98,7 +114,6 @@ class GlobalState(TypedDict):
 
     # Supervisor coordination
     todo_list_path: NotRequired[str]  # Path to the .json todo list in VFS
-    active_tasks: NotRequired[Annotated[list[str], operator.add]]
 
     # Track VFS directories containing worker findings
     findings_paths: NotRequired[Annotated[list[str], operator.add]]
@@ -122,9 +137,6 @@ class SupervisorState(TypedDict):
     # NotRequired because it's None on the first supervisor iteration before the LLM creates one.
     todo_list_path: NotRequired[str]
 
-    # Need this to track which workers are active
-    active_tasks: Annotated[list[str], operator.add]
-
     # Track VFS directories containing worker findings
     findings_paths: NotRequired[Annotated[list[str], operator.add]]
 
@@ -137,7 +149,7 @@ class WorkerState(TypedDict):
 
     brief: ResearchBrief
     output_dirname: str  # The directory name for this worker's findings
-    run_root: str        # The base VFS path for this thread
+    run_root: str  # The base VFS path for this thread
 
     # Every worker needs its own message history for its search loop
     # Renamed to researcher_messages so it can be isolated from the supervisor_messages

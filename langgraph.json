@@ -1,7 +1,9 @@
 {
   "$schema": "https://langgra.ph/schema.json",
   "dependencies": [
-    "."
+    "src",
+    "pyproject.toml",
+    "uv.lock"
   ],
   "graphs": {
     "agent": "./src/deep_research/graph.py:graph"

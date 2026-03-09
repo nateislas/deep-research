@@ -180,3 +180,23 @@ The supervisor creates a detailed ConductResearch object which seeds the worker 
 Use a single source of truth in the compressed_summary.md files to keep track of the findings.
 
 Upon worker completion, we inject ALL compressed summaries into the supervisors prompt. I decided to go with this approach rather than storing it in the state because I wanted to keep the state with only neccessary informtion that actually needs to be checkpointed and passed between nodes.
+
+### Current ResearchBrief generation process
+
+**IMPORTANT, come back to this**
+
+Right now, we're having the first node generate the research brief, and then pass it to the supervisor node. It creates 5-15 subobjectives for the research brief, and then passes it to the supervisor node. This works well, but it could be introducing bias from the model which is reliant upon (usually) outdated information. However, maybe what we should be doing instead is keep it to about 4-6 broad subobjectives, and then let the workers do the heavy lifting of breaking down the subobjectives into more specific tasks based on what information was found. This reflects the actual process of research, where we start with a broad overview and then break down the subobjectives into more specific tasks based on what information was found.
+
+# Report generation
+
+Tried to have tool calling, introduced problems
+
+# Supervisor spawning workers
+
+Kept having problems where the supervisor would only spawn a couple at a time instead of a large parallel search. Call the research stuff in batches
+
+Did the same for adding suptopics
+
+Want to play around with MAX_CONCURRENT_WORKERS and generating fewer initial sub-topics in the research brief
+
+Sometimes it runs for at least 4 itereations, other times 10. sOmetimes it has many additional topics added, other times it's only a few.
