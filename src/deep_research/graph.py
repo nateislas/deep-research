@@ -339,8 +339,8 @@ async def supervisor_tools(
     thread_id = config["configurable"].get("thread_id", "default")
     run_root = RESEARCH_ROOT / thread_id
 
-    # Track which VFS directories workers write to
-    findings_paths = list(state.get("findings_paths") or [])
+    # Track VFS directories workers write to
+    new_findings_paths = []
     todo_path = state.get("todo_list_path")
 
     # 1. Handle TodoList updates
@@ -380,7 +380,12 @@ async def supervisor_tools(
                     break
 
         worker_inputs.append(
-            {"task_id": task_id, "sub_topic": sub_topic, "args": args, "batch_id": item["batch_id"]}
+            {
+                "task_id": task_id,
+                "sub_topic": sub_topic,
+                "args": args,
+                "batch_id": item["batch_id"],
+            }
         )
 
     # Build the list of awaitables
@@ -427,16 +432,14 @@ async def supervisor_tools(
         batch_id = item["batch_id"]
 
         if isinstance(result, Exception):
-            batch_outcomes[batch_id].append(
-                f"Task {task_id} FAILED: {result!s}"
-            )
+            batch_outcomes[batch_id].append(f"Task {task_id} FAILED: {result!s}")
             continue
 
         batch_outcomes[batch_id].append(
             f"Task {task_id} COMPLETED: {sub_topic[:40]}..."
         )
         completed_task_ids.append(task_id)
-        findings_paths.append(str(run_root / item["args"]["output_dirname"]))
+        new_findings_paths.append(str(run_root / item["args"]["output_dirname"]))
 
     # Add deferred tasks to the outcomes
     for item in deferred_tasks:
@@ -464,7 +467,7 @@ async def supervisor_tools(
         goto="supervisor",
         update={
             "supervisor_messages": all_tool_messages,
-            "findings_paths": findings_paths,
+            "findings_paths": new_findings_paths,
             "todo_list_path": todo_path,
         },
     )

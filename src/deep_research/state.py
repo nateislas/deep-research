@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from typing_extensions import NotRequired, TypedDict
 
 
-# Structured data
+# =========================== Structured data ===========================
 class ResearchTask(BaseModel):
     """An individual research task to be performed by a worker."""
 
@@ -82,15 +82,15 @@ class ResearchBrief(BaseModel):
         description="The formal search boundaries. Define the specific parameters for inclusion and exclusion."
     )
     sub_objectives: list[str] = Field(
-        description="A list of 5-10 foundational, actionable search directives. These must be empirical and searchable categories of information. Do not include methodological instructions.",
-        min_items=5,
-        max_items=10,
+        description="A list of 4-6 foundational, actionable search directives. These must be empirical and searchable categories of information. Do not include methodological instructions.",
+        min_items=4,
+        max_items=6,
     )
 
     brief_status: Literal["pending", "approved", "proposed"] = Field(default="pending")
 
 
-# States
+# =========================== States ===========================
 
 
 # Using TypedDict for state because it allows for flexible updates without

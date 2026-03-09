@@ -196,3 +196,5 @@ Tried to have tool calling, introduced problems
 Kept having problems where the supervisor would only spawn a couple at a time instead of a large parallel search. Call the research stuff in batches
 
 Did the same for adding suptopics
+
+Want to play around with MAX_CONCURRENT_WORKERS and generating fewer initial sub-topics in the research brief
