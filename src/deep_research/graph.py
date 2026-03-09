@@ -261,7 +261,7 @@ async def supervisor(
         tools = [ConductResearchBatch, AddSubTopicBatch]
 
     # invoke the LLM
-    # gpt-4.1: strongest available planner for decomposing the ResearchBrief
+    # o3-mini: strongest available planner for decomposing the ResearchBrief
     # and orchestrating workers. Called only ~5-10 times per run, so cost is fine.
     model = init_chat_model(
         model="o3-mini", model_provider="openai", reasoning_effort="high"

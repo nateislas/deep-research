@@ -115,7 +115,8 @@ def handle_subtopic_additions(
 
         messages.append(
             ToolMessage(
-                content="\n".join(batch_outcomes) or "No sub-topics added in this batch.",
+                content="\n".join(batch_outcomes)
+                or "No sub-topics added in this batch.",
                 tool_call_id=bc["id"],
             )
         )
@@ -235,8 +236,8 @@ def get_findings_summary(vfs_root: Path) -> str:
                         all_leads.append(f"### Leads from {topic_name}:\n{leads_raw}")
 
             # Character limit guard to prevent prompt overflow
-            if len(content) > 4000:
-                content = content[:4000] + "... [Truncated]"
+            # if len(content) > 4000:
+            #    content = content[:4000] + "... [Truncated]"
 
             # Format as a clean section for the summary
             topic_dir = summary_path.parent.name
@@ -255,14 +256,14 @@ def get_findings_summary(vfs_root: Path) -> str:
     main_findings = "\n---\n".join(summaries)
 
     if all_leads:
-        leads_ledger = "\n\n".join(all_leads)
+        leads_summary = "\n\n".join(all_leads)
         return (
             f"{main_findings}\n\n"
             "--- \n\n"
             "## CONSOLIDATED LEADS FOR EXPANSION\n"
             "The following leads were proposed by workers for further investigation. "
             "Evaluate these against the Main Objective and use AddSubTopic to follow the most promising ones:\n\n"
-            f"{leads_ledger}"
+            f"{leads_summary}"
         )
 
     return main_findings
