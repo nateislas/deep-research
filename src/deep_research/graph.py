@@ -651,7 +651,7 @@ async def generate_final_report(
     model = init_chat_model(
         model="o3-mini",
         model_provider="openai",
-        reasoning_effort="medium",
+        reasoning_effort="high",
     )
 
     # 4. Invoke LLM with just the system prompt and a human message to kick it off

@@ -87,8 +87,10 @@ RESEARCHER_PROMPT = """You are a specialized AI Research Worker. Your mission is
    - **IMPORTANT**: `exa_search` automatically records the FULL text and metadata of every result to `raw_content.md` for later use. You do NOT need to write this file.
 4. **Iterate**: If results are thin, run more targeted searches.
 5. **Compress**: Synthesize your gathered findings into `compressed_summary.md`.
-   - **MANDATORY**: You MUST explicitly highlight any promising leads, unanswered questions, or crucial dependencies for the Supervisor to investigate further.
-   - **MANDATORY**: You MUST call the `write_file` tool to save this summary. If you finish without calling `write_file`, your research will be lost.
+    - **MANDATORY**: You MUST explicitly highlight any promising leads, unanswered questions, or crucial dependencies for the Supervisor to investigate further.
+    - **MANDATORY**: You MUST call the `write_file` tool to save this summary. If you finish without calling `write_file`, your research will be lost.
+    - **EXHAUSTIVENESS RULE**: Brevity is the enemy of a deep research report. Your output must be exhaustive. If you find high-value information, include it. Do not artificially truncate your summary.
+    - **PERSISTENCE RULE**: Never declare that "no results exist" unless you have attempted at least 5 distinct search queries with varying parameters (neural, keyword, different time ranges). If you hit a technical hurdle, report it specifically, but do not stop trying other avenues.
 
 6. **Summarize with Purpose**: Your findings and proposed follow-ups must be anchored in the **Project Topic** and **Main Objective**. Do not just report facts; report their *significance*.
 
@@ -123,17 +125,17 @@ A dense, citation-rich synthesis. You MUST use this exact structure:
 
 ## Key Findings
 - [Specific fact or data point] ([source title](URL))
-[3-8 bullets, each citing its source]
+[Aim for 15-20+ distinct and detailed bullets, each citing its source]
 
 ## Relevance to Objective
 For each finding above, explicitly answer: **"How does this specifically provide evidence for the Main Objective?"** 
 (e.g., "This finding establishes the relationship between the observed phenomena, directly supporting the core hypothesis of the Research Brief.")
 
 ## Data & Statistics
-[Specific numbers, metrics, dates, percentages — each sourced]
+[Detailed numbers, metrics, dates, percentages — each sourced. Do not leave any significant data out.]
 
 ## Analysis
-[2-3 paragraphs synthesizing what the sources collectively say.]
+[As many paragraphs as needed to fully explore the sub-topic and synthesize what the sources collectively say. Focus on connections and mechanisms.]
 
 ## Promising Leads & Follow-ups
 [Identify 1-3 critical leads. For every lead, include a "Rationale" explaining why it provides **Foundational Evidence** rather than **Analytical Noise**.]
@@ -161,7 +163,10 @@ For each finding above, explicitly answer: **"How does this specifically provide
 # --- Report Synthesis Prompt ---
 
 REPORT_SYNTHESIS_PROMPT = """
-Your goal is to synthesize the provided research into a professional, clear, and highly-digestible report that definitively answers the Research Brief. 
+Your goal is to synthesize the provided research into a professional, clear, and highly-authoritative report that definitively answers the Research Brief. 
+
+## Target Length
+This should be a long-form, multi-section report (aim for 3,000 to 5,000 words). Use the full depth of the gathered findings provided. Do not summarize; expand and analyze.
 
 ## The "North Star" Principle
 Every sentence, paragraph, and section in this report must exist only to answer the **Main Objective** and the **Research Brief**. 
