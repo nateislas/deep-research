@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -53,13 +54,9 @@ from deep_research.utils import (
     todo_to_string,
 )
 
-# Hard limit on supervisor iterations to prevent infinite research loops.
-# If research isn't done in 15 rounds, something is wrong with the prompt or model.
-MAX_ITERATIONS = 15
-
-# How many workers the supervisor can spawn in a single round.
-# 10 allows for high throughput during complex research tasks.
-MAX_CONCURRENT_WORKERS = 10
+# Research Limits from environment with defaults
+MAX_ITERATIONS = int(os.getenv("RESEARCH_MAX_ITERATIONS", "15"))
+MAX_CONCURRENT_WORKERS = int(os.getenv("RESEARCH_MAX_CONCURRENT_WORKERS", "10"))
 
 # --- Nodes ---
 
@@ -70,9 +67,11 @@ async def research_intake(
 ) -> Command[Literal["supervisor", "__end__"]]:
     """Handle the intake conversation and brief finalization."""
     # 1. Initialize model and bind tools
-    # gpt-5-nano: sharp enough to infer intent, fast, and cheap.
+    # Model and reasoning from environment
+    model_name = os.getenv("RESEARCH_INTAKE_MODEL", "gpt-5-nano")
+    reasoning = os.getenv("RESEARCH_INTAKE_REASONING", "low")
     model = init_chat_model(
-        model="gpt-5-nano", model_provider="openai", reasoning_effort="low"
+        model=model_name, model_provider="openai", reasoning_effort=reasoning
     ).bind_tools([ResearchBrief, ApproveBrief])
 
     # 2. Invoke LLM with the system prompt and history
@@ -221,10 +220,11 @@ async def supervisor(
         tools = [ConductResearchBatch, AddSubTopicBatch]
 
     # invoke the LLM
-    # o3-mini: strongest available planner for decomposing the ResearchBrief
-    # and orchestrating workers. Called only ~5-10 times per run, so cost is fine.
+    # Model and reasoning from environment
+    model_name = os.getenv("RESEARCH_SUPERVISOR_MODEL", "o3-mini")
+    reasoning = os.getenv("RESEARCH_SUPERVISOR_REASONING", "high")
     model = init_chat_model(
-        model="o3-mini", model_provider="openai", reasoning_effort="high"
+        model=model_name, model_provider="openai", reasoning_effort=reasoning
     )
     llm_with_tools = model.bind_tools(tools)
     response = await llm_with_tools.ainvoke(messages)
@@ -480,12 +480,12 @@ async def worker(
     all_tools = search_tools + fs_tools
 
     # 3. Initialize Model & Bind Tools
-    # gpt-5-nano w/ low reasoning_effort: nearly free ($0.05/1M in), fast,
-    # and capable enough for targeted search + synthesis tasks.
+    model_name = os.getenv("RESEARCH_WORKER_MODEL", "gpt-5-nano")
+    reasoning = os.getenv("RESEARCH_WORKER_REASONING", "low")
     model = init_chat_model(
-        model="gpt-5-nano",
+        model=model_name,
         model_provider="openai",
-        reasoning_effort="low",
+        reasoning_effort=reasoning,
     )
     # We bind all tools so the worker can search OR write files
     llm_with_tools = model.bind_tools(all_tools)
@@ -628,10 +628,12 @@ async def generate_final_report(
     )
 
     # 3. Initialize Model
+    model_name = os.getenv("RESEARCH_REPORT_MODEL", "o3-mini")
+    reasoning = os.getenv("RESEARCH_REPORT_REASONING", "high")
     model = init_chat_model(
-        model="o3-mini",
+        model=model_name,
         model_provider="openai",
-        reasoning_effort="high",
+        reasoning_effort=reasoning,
     )
 
     # 4. Invoke LLM with just the system prompt and a human message to kick it off

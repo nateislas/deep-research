@@ -103,15 +103,19 @@ def exa_search(
     """
     exa = Exa(api_key=os.getenv("EXA_API_KEY"))
 
+    num_results = int(os.getenv("EXA_NUM_RESULTS", "8"))
+    max_chars = int(os.getenv("EXA_MAX_CHARACTERS", "8000"))
+    num_sentences = int(os.getenv("EXA_NUM_SENTENCES", "5"))
+
     results = exa.search_and_contents(
         query,
-        num_results=8,
+        num_results=num_results,
         type=search_type,
         livecrawl=livecrawl,
         category=category,
         start_published_date=start_published_date,
-        text={"max_characters": 8000},  # type: ignore
-        highlights={"query": query, "num_sentences": 5},  # type: ignore
+        text={"max_characters": max_chars},  # type: ignore
+        highlights={"query": query, "num_sentences": num_sentences},  # type: ignore
         summary={"query": query},  # type: ignore
     )
 
