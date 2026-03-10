@@ -32,10 +32,9 @@ from deep_research.prompts import (
 )
 from deep_research.state import (
     AddSubTopicBatch,
-    ApproveBrief,
     ConductResearchBatch,
     GlobalState,
-    ResearchBrief,
+    IntakeAction,
     SupervisorState,
     WorkerState,
 )
@@ -58,8 +57,6 @@ from deep_research.utils import (
 MAX_ITERATIONS = int(os.getenv("RESEARCH_MAX_ITERATIONS", "15"))
 MAX_CONCURRENT_WORKERS = int(os.getenv("RESEARCH_MAX_CONCURRENT_WORKERS", "10"))
 
-# --- Nodes ---
-
 
 async def research_intake(
     state: GlobalState,
@@ -72,20 +69,18 @@ async def research_intake(
     reasoning = os.getenv("RESEARCH_INTAKE_REASONING", "low")
     model = init_chat_model(
         model=model_name, model_provider="openai", reasoning_effort=reasoning
-    ).bind_tools([ResearchBrief, ApproveBrief])
+    ).with_structured_output(IntakeAction)
 
     # 2. Invoke LLM with the system prompt and history
     history = [SystemMessage(content=RESEARCH_INTAKE_PROMPT)] + state["messages"]
-    response = await model.ainvoke(history)
+    response: IntakeAction = await model.ainvoke(history)
 
-    # 3. Process Tool Calls for structured transitions
-    if response.tool_calls:
-        # Check for approval first (moves to supervisor phase)
-        approval_call = next(
-            (tc for tc in response.tool_calls if tc["name"] == "ApproveBrief"), None
-        )
-        if approval_call and state.get("brief"):
-            updated_brief = state["brief"].model_copy(update={"brief_status": "approved"})
+    # 3. Process structured action
+    if response.action == "approve_brief":
+        if state.get("brief"):
+            updated_brief = state["brief"].model_copy(
+                update={"brief_status": "approved"}
+            )
             return Command(
                 goto="supervisor",
                 update={
@@ -100,32 +95,40 @@ async def research_intake(
                     "iteration_count": 0,
                 },
             )
-
-        # Check for ResearchBrief call (proposes/updates the plan)
-        brief_call = next(
-            (tc for tc in response.tool_calls if tc["name"] == "ResearchBrief"), None
-        )
-        if brief_call:
-            brief_args = brief_call["args"].copy()
-            brief_args.pop("brief_status", None)
-            new_brief = ResearchBrief(**brief_args, brief_status="proposed")
-
-            instruction = "I've drafted a research plan. Please review the objectives and scope below. Type **'Approve'** to start research, or let me know if you'd like to adjust it."
-            content = (
-                f"{response.content}\n\n{instruction}"
-                if response.content
-                else instruction
-            )
-
+        else:
+            # If they tried to approve but no brief exists yet
             return Command(
                 update={
-                    "messages": [AIMessage(content=content)],
-                    "brief": new_brief,
+                    "messages": [
+                        AIMessage(
+                            content="Error: You attempted to approve a brief, but no ResearchBrief has been formally proposed yet. I must propose a plan before it can be approved."
+                        )
+                    ]
                 }
             )
 
-    # 4. Standard Text Response (Clarification Question)
-    return Command(update={"messages": [response]})
+    elif response.action == "propose_brief" and response.proposed_brief:
+        new_brief = response.proposed_brief
+        new_brief.brief_status = "proposed"
+
+        content = (
+            response.message_to_user
+            or "I have proposed a research brief. Please review and type 'Approve' if it looks good."
+        )
+
+        return Command(
+            update={
+                "messages": [AIMessage(content=content)],
+                "brief": new_brief,
+            }
+        )
+
+    # Fallback to clarifying question if action is clarify or anything else
+    content = (
+        response.message_to_user
+        or "Could you provide more details about what you'd like to research?"
+    )
+    return Command(update={"messages": [AIMessage(content=content)]})
 
 
 async def supervisor(

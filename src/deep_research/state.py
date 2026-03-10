@@ -93,14 +93,20 @@ class ResearchBrief(BaseModel):
     brief_status: Literal["pending", "approved", "proposed"] = Field(default="pending")
 
 
-class ApproveBrief(BaseModel):
-    """Signifies that the user has explicitly approved the current research brief.
+class IntakeAction(BaseModel):
+    """The action the AI should take in the current conversational turn."""
 
-    Call this tool only when the user says 'Approve', 'Yes', 'Looks good', etc.
-    This will finalize the plan and start the active research phase.
-    """
-
-    pass
+    action: Literal["clarify", "propose_brief", "approve_brief"] = Field(
+        description="The action to take. Choose 'clarify' to ask a question, 'propose_brief' to suggest a research plan, or 'approve_brief' if the user has explicitly approved the proposed plan."
+    )
+    message_to_user: str | None = Field(
+        default=None,
+        description="The message to display to the user. MUST be populated for clarify and propose_brief actions. When proposing a brief, this MUST contain the full markdown formatted Research Brief for the user to review, ending with an instruction to type 'Approve' to proceed.",
+    )
+    proposed_brief: ResearchBrief | None = Field(
+        default=None,
+        description="The drafted research brief if action is 'propose_brief'.",
+    )
 
 
 # =========================== States ===========================
