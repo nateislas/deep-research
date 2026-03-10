@@ -1,5 +1,7 @@
 # Deep Research Agent
 
+## 🔬 [Technical Design Document (docs/DESIGN.md)](docs/DESIGN.md)
+
 A deep research agent implemented with [LangGraph](https://github.com/langchain-ai/langgraph), designed to accept a query and return a highly detailed, grounded report based on parallelized web research.
 
 ## Overview
