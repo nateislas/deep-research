@@ -86,13 +86,6 @@ We can use gpt-1o-mini for the supervisor and gpt-5-nano for the workers. This i
 
 User <-> Question Refinement/Brief Generation -> Supervisor + Sub-agent loop -> Report Generation
 
-```mermaid
-graph LR
-    User[User] <--> Brief[Question Refinement / Brief Generation]
-    Brief --> Supervisor[Supervisor]
-    Supervisor --> Report[Report Generation]
-    Supervisor <--> SubAgents[Sub-agents<br/>(parallelized)]
-```
 
 ### Tools we'll need
 
@@ -239,3 +232,9 @@ I used the off the shelf file management tools for the workers.
 * Make the final report generation process more dynamic
 * Need to explore further on how detailed the information extraction from search results should be. Right now, we're probably saving too much information in the raw_content.md files
 * I've noticed that the research_intake makes too many assumptions. There's a real trade-off here though. Do we bombard the user with questions to ensure we have the most accurate information, or do we make assumptions to speed up the process?
+
+## Architecture Diagram
+
+<p align="center">
+  <img src="figures/fig1.png" alt="Deep Research Architecture" width="800px" />
+</p>
