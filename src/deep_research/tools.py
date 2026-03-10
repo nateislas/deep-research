@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from typing import Any
 
 from exa_py import Exa
 from langchain_community.agent_toolkits import FileManagementToolkit
@@ -165,10 +166,35 @@ def exa_search(
     return "\n\n---\n\n".join(llm_parts)
 
 
-def get_search_tools() -> list[BaseTool]:
+def get_search_tools(worker_vfs_dir: str | None = None) -> list[BaseTool]:
     """Get the Exa search tool for the research worker.
+
+    Args:
+        worker_vfs_dir: Optional absolute path to dynamically inject into the
+                        search tool to auto-record 'raw_content.md' logs.
 
     Returns:
         A list containing the custom exa_search tool.
     """
-    return [exa_search]
+    if not worker_vfs_dir:
+        return [exa_search]
+
+    # Dynamically bind the vfs_path to the base exa_search tool so the
+    # LLM doesn't have to provide it, and graph.py doesn't have to hack it in.
+    def bound_exa_search(*args: Any, **kwargs: Any) -> str:
+        kwargs["vfs_path"] = worker_vfs_dir
+        return exa_search.invoke(args or kwargs)
+
+    async def bound_aexa_search(*args: Any, **kwargs: Any) -> str:
+        kwargs["vfs_path"] = worker_vfs_dir
+        return await exa_search.ainvoke(args or kwargs)
+
+    wrapped_search = StructuredTool.from_function(
+        func=bound_exa_search,
+        coroutine=bound_aexa_search,
+        name=exa_search.name,
+        description=exa_search.description,
+        args_schema=exa_search.args_schema,
+    )
+
+    return [wrapped_search]

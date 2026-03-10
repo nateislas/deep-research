@@ -68,7 +68,7 @@ The major consideration that I need to figure out is how a worker decides when i
 
 I also want the supervisor and workers to be able to dynamically adjust the research brief as needed when it finds new information that might be relevant to the research brief.
 
-Model Contenders:
+### Model Contenders
 
 * gpt-4.1-mini (used by Open Deep Research)     input: $0.40, output: $1.60
 * gpt-4.1 (used by Open Deep Research)          input: $2.00, output: $8.00
@@ -82,7 +82,7 @@ Model Contenders:
 The models have advanced quite a bit since gpt-4.1. GPT-5-nano is better at reasoning (based on initial findings) and the cost is roughly comparable to gpt-4.1. We'll use reasoning_effort = "low" to descrease latency though.
 We can use gpt-1o-mini for the supervisor and gpt-5-nano for the workers. This is because the supervisor will be doing more reasoning and planning, while the workers will be doing more information gathering.
 
-I am also planning on making everything configureable (e.g. search depth, model, etc.)
+### Inital Architecture
 
 User <-> Question Refinement/Brief Generation -> Supervisor + Sub-agent loop -> Report Generation
 
@@ -171,7 +171,7 @@ The ResearchBrief Prompt:
 
 * Decided to essentially hardcode the todolist because we don't need the LLM to decide to create it and where to create it becasue we always need it in the same spot
 
-### Worker
+### Workers
 
 The supervisor creates a detailed ConductResearch object which seeds the worker with a subtopic, additional context, and a directory name. Each worker saves information in a folder assigned to it. There are two files in this folder: raw_content.md and compressed_summary.md. When a worker makes a tool call to exa_search(), the search tool directly appends the ENTIRE search result information (summary, full text excerpts, etc) to the raw_content.md file. The tool returns only a 'summary' and 'highlights' back to the worker to keep the context window small. Upon completion, the worker **must call the write_file tool to save its compressed_summary.md synthesis, which it creates from its own message history.
 
@@ -181,22 +181,51 @@ Use a single source of truth in the compressed_summary.md files to keep track of
 
 Upon worker completion, we inject ALL compressed summaries into the supervisors prompt. I decided to go with this approach rather than storing it in the state because I wanted to keep the state with only neccessary informtion that actually needs to be checkpointed and passed between nodes.
 
+Initally, the supervisor had access to ConductResearch tool, which would spawn an individual worker for the sub-topic. Howver, I noticed that the supervisor kept only spawning a couple at a time, even when there were many tasks waiting to be completed in the to-do list. Because of this, I changed the tool it had access to ConductResearchBatch, which more consistency spun up many workers at once.
+
+### Adaptive search and to-do list updates
+
+Similar to the supervisor failing to spawn multiple sub-topics at the same time, the supervisor also failed to update the to-do list multiple times at the same time. I went with a batch approach here as well.
+
 ### Current ResearchBrief generation process
 
 **IMPORTANT, come back to this**
 
-Right now, we're having the first node generate the research brief, and then pass it to the supervisor node. It creates 5-15 subobjectives for the research brief, and then passes it to the supervisor node. This works well, but it could be introducing bias from the model which is reliant upon (usually) outdated information. However, maybe what we should be doing instead is keep it to about 4-6 broad subobjectives, and then let the workers do the heavy lifting of breaking down the subobjectives into more specific tasks based on what information was found. This reflects the actual process of research, where we start with a broad overview and then break down the subobjectives into more specific tasks based on what information was found.
+Right now, we're having the first node generate the research brief, and then pass it to the supervisor node. It creates 5-15 sub-objectives for the research brief, and then passes it to the supervisor node. This works well, but it could be introducing bias from the model which is reliant upon (usually) outdated information. However, maybe what we should be doing instead is keep it to about 4-6 broad sub-objectives, and then let the workers do the heavy lifting of breaking down the sub-objectives into more specific tasks based on what information was found. This reflects the actual process of research, where we start with a broad overview and then break down the sub-objectives into more specific tasks based on what information was found.
 
-# Report generation
+I initally wanted the VFS because I wanted to be able to refer to the raw_content.md files to generate the report if the final generation model felt like it needed additional information. This got very complex because the raw_content.md files are very large bc they contain the entire search results and full text excerpts.
 
-Tried to have tool calling, introduced problems
+I ended up just feeding the compressed_summary.md files to the final generation model which seems to work well.
 
-# Supervisor spawning workers
+## Final Design
 
-Kept having problems where the supervisor would only spawn a couple at a time instead of a large parallel search. Call the research stuff in batches
+### Architecture
 
-Did the same for adding suptopics
+### Core data structures and state
 
-Want to play around with MAX_CONCURRENT_WORKERS and generating fewer initial sub-topics in the research brief
+### Node responsibilities
 
-Sometimes it runs for at least 4 itereations, other times 10. sOmetimes it has many additional topics added, other times it's only a few.
+ResearchIntake
+
+Supervisor
+
+SupervisorTools
+
+Worker
+
+WorkerTools
+
+FinalReport
+
+### Notes on design choices based on experience
+
+* Difficult to get the supervisor to go deep based on the information that the workers discover
+* Having the research_intake make assumptions is a double edged sword. It speeds up the process, but it can also lead to the model misunderstanding the user's intent
+* I think that having the research_intake node decompose the research goal into broad "foundational" sub-topics is a good approach. At first I relied on this stage to generate the ENTIRE researchbrief and only add a few new topics occassionally. However, I wanted this deep research agent to reflect how people actually perform research (i.e. you start with a few broad search based on prior knowledge and expand based on the new information you find)
+
+##### Future Improvements
+
+* Make the model choice configureable
+* Make the final report generation process more dynamic
+* Need to explore further on how detailed the information extraction from search results should be. Right now, we're probably saving too much information in the raw_content.md files
+* I've noticed that the research_intake makes too many assumptions. There's a real trade-off here though. Do we bombard the user with questions to ensure we have the most accurate information, or do we make assumptions to speed up the process?

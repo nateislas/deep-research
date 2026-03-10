@@ -6,7 +6,6 @@ supervision, and research tasks, and connecting them with appropriate routing.
 
 from __future__ import annotations
 
-import asyncio
 import datetime
 import os
 from pathlib import Path
@@ -31,9 +30,11 @@ from deep_research.prompts import (
 )
 from deep_research.state import (
     ConductResearchBatch,
+    CreateTodoList,
     GlobalState,
     IntakeAction,
     SupervisorState,
+    TodoList,
     UpdateTodoListBatch,
     WorkerState,
 )
@@ -43,10 +44,9 @@ from deep_research.tools import (
 )
 from deep_research.utils import (
     RESEARCH_ROOT,
-    CreateTodoList,
-    TodoList,
     brief_to_prompt_vars,
     dispatch_workers_concurrently,
+    execute_tools_concurrently,
     get_findings_summary,
     handle_batch_task_updates,
     handle_todo_updates,
@@ -429,48 +429,16 @@ async def worker_tools(
 
     worker_dir = str(Path(state["run_root"]) / state["output_dirname"])
 
+    # tools.py's get_search_tools now cleanly accepts the vfs path and wraps it natively
     tools_map = {
         t.name: t
-        for t in (get_search_tools() + get_worker_filesystem_tools(worker_dir))
+        for t in (
+            get_search_tools(worker_dir) + get_worker_filesystem_tools(worker_dir)
+        )
     }
 
-    tool_messages = []
-    for tc in tool_calls:
-        tool = tools_map.get(tc["name"])
-        if tool:
-            args = dict(tc["args"])
-            # Inject vfs_path into exa_search calls so raw content is auto-logged.
-            # We do it here (at invocation time) because functools.partial doesn't
-            # work with StructuredTool's _arun dispatch path.
-            if tc["name"] == "exa_search":
-                args["vfs_path"] = worker_dir
-
-            # Retry transient failures (e.g. rate limits, timeouts) up to 2 times.
-            max_attempts = 3
-            last_error: Exception | None = None
-            result = None
-            for attempt in range(max_attempts):
-                try:
-                    result = await tool.ainvoke(args)
-                    last_error = None
-                    break
-                except Exception as e:
-                    last_error = e
-                    if attempt < max_attempts - 1:
-                        await asyncio.sleep(3 * (attempt + 1))  # 3s, then 6s
-
-            if last_error is not None:
-                result = f"Tool error after {max_attempts} attempts: {last_error!s}"
-
-            tool_messages.append(
-                ToolMessage(content=str(result), tool_call_id=tc["id"])
-            )
-        else:
-            tool_messages.append(
-                ToolMessage(
-                    content=f"Tool {tc['name']} not found.", tool_call_id=tc["id"]
-                )
-            )
+    # Execute all tools requested by the LLM in parallel (e.g., 3 searches at once)
+    tool_messages = await execute_tools_concurrently(tool_calls, tools_map)
 
     return Command(goto="worker", update={"researcher_messages": tool_messages})
 

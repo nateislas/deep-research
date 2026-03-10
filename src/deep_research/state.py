@@ -14,6 +14,30 @@ from typing_extensions import NotRequired, TypedDict
 
 
 # =========================== Structured data ===========================
+class TaskItem(BaseModel):
+    """A single research task in the todo list."""
+
+    id: int = Field(description="The unique integer ID of the research task.")
+    task: str = Field(description="The description of the research task.")
+
+
+class TodoList(BaseModel):
+    """The todo list for the research agent."""
+
+    tasks: list[TaskItem] = Field(
+        description="The full updated list of pending research tasks."
+    )
+    completed_tasks: list[TaskItem] = Field(default_factory=list)
+
+
+class CreateTodoList(BaseModel):
+    """Create the initial todo list for the research project."""
+
+    tasks: list[TaskItem] = Field(
+        description="The full list of initial pending research tasks."
+    )
+
+
 class ResearchTask(BaseModel):
     """An individual research task to be performed by a worker."""
 

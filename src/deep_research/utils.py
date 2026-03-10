@@ -6,35 +6,10 @@ from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
-from pydantic import BaseModel, Field
+from langchain_core.tools import BaseTool
 
 from deep_research.prompts import RESEARCHER_PROMPT
-from deep_research.state import ResearchBrief
-
-
-class TaskItem(BaseModel):
-    """A single research task in the todo list."""
-
-    id: int = Field(description="The unique integer ID of the research task.")
-    task: str = Field(description="The description of the research task.")
-
-
-class TodoList(BaseModel):
-    """The todo list for the research agent."""
-
-    tasks: list[TaskItem] = Field(
-        description="The full updated list of pending research tasks."
-    )
-    completed_tasks: list[TaskItem] = Field(default_factory=list)
-
-
-class CreateTodoList(BaseModel):
-    """Create the initial todo list for the research project."""
-
-    tasks: list[TaskItem] = Field(
-        description="The full list of initial pending research tasks."
-    )
-
+from deep_research.state import ResearchBrief, TaskItem, TodoList
 
 # Resolve RESEARCH_ROOT, allowing override from environment variable.
 # Default is project root / "vfs"
@@ -288,6 +263,54 @@ async def dispatch_workers_concurrently(
     ]
 
     return completed_task_ids, batch_msgs, new_findings_paths
+
+
+async def execute_tools_concurrently(
+    tool_calls: list[dict],
+    tools_map: dict[str, BaseTool],
+    max_attempts: int = 3,
+) -> list[ToolMessage]:
+    """Execute multiple LLM tool calls concurrently with built-in retry logic.
+
+    Args:
+        tool_calls: List of dictionary tool calls from the LLM message.
+        tools_map: Dictionary mapping tool names to BaseTool objects.
+        max_attempts: Number of times to retry a failed tool.
+
+    Returns:
+        List of formatted ToolMessages containing the results or errors.
+    """
+
+    async def execute_single_tool(tc: dict) -> ToolMessage:
+        tool = tools_map.get(tc["name"])
+        if not tool:
+            return ToolMessage(
+                content=f"Tool {tc['name']} not found.", tool_call_id=tc["id"]
+            )
+
+        args = dict(tc["args"])
+        last_error = None
+        result = None
+
+        for attempt in range(max_attempts):
+            try:
+                result = await tool.ainvoke(args)
+                last_error = None
+                break
+            except Exception as e:
+                last_error = e
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(3 * (attempt + 1))  # 3s, then 6s
+
+        if last_error is not None:
+            result = f"Tool error after {max_attempts} attempts: {last_error!s}"
+
+        return ToolMessage(content=str(result), tool_call_id=tc["id"])
+
+    # Launch all tool executions concurrently
+    coroutines = [execute_single_tool(tc) for tc in tool_calls]
+    results = await asyncio.gather(*coroutines)
+    return list(results)
 
 
 # --- Prompt Formatting Helpers ---
