@@ -10,7 +10,11 @@ This project implements a multi-step research workflow managed by a supervisor-w
 2. **Research Loop**: A Supervisor intelligently breaks down the brief into a Todo list and spawns parallel Worker sub-agents. Workers use tools (like Exa Search) to gather information, automatically writing massive results to a Virtual File System (VFS) and synthesizing key findings into compressed summaries.
 3. **Final Report Generation**: Aggregates all worker summaries and the original brief to generate a cohesive, deeply grounded report with in-text citations.
 
-![Deep Research Architecture](docs/fig1.png)
+## Architecture
+
+<p align="center">
+  <img src="docs/fig1.png" alt="Deep Research Architecture" width="800px" />
+</p>
 
 ## Getting Started
 
