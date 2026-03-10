@@ -86,7 +86,6 @@ We can use gpt-1o-mini for the supervisor and gpt-5-nano for the workers. This i
 
 User <-> Question Refinement/Brief Generation -> Supervisor + Sub-agent loop -> Report Generation
 
-
 ### Tools we'll need
 
 #### Search APIs
