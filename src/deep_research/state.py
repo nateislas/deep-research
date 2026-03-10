@@ -48,26 +48,26 @@ class ConductResearchBatch(BaseModel):
     )
 
 
-class NewSubTopic(BaseModel):
-    """A new sub-topic to be added to the research plan."""
+class NewTask(BaseModel):
+    """A new task to be added to the research plan."""
 
-    new_sub_topic: str = Field(
+    new_task: str = Field(
         description="A clear, human-readable description of the new research direction or thematic component."
     )
     rationale: str = Field(
-        description="Why this sub-topic is worth investigating. Cite the worker finding that surfaced it."
+        description="Why this new task is worth investigating. Cite the worker finding that surfaced it."
     )
 
 
-class AddSubTopicBatch(BaseModel):
-    """Add MULTIPLE new sub-topics to the research todo list simultaneously.
+class UpdateTodoListBatch(BaseModel):
+    """Add MULTIPLE new tasks to the research todo list simultaneously.
 
     Use this when worker findings reveal important angles that the original
     ResearchBrief did not anticipate.
     """
 
-    topics: list[NewSubTopic] = Field(
-        description="A list of new sub-topics to add to the research plan.",
+    new_tasks: list[NewTask] = Field(
+        description="A list of new tasks to add to the research plan.",
         min_length=1,
     )
 

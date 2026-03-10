@@ -26,6 +26,14 @@ class TodoList(BaseModel):
     completed_tasks: list[TaskItem] = Field(default_factory=list)
 
 
+class CreateTodoList(BaseModel):
+    """Create the initial todo list for the research project."""
+
+    tasks: list[TaskItem] = Field(
+        description="The full list of initial pending research tasks."
+    )
+
+
 # Resolve RESEARCH_ROOT, allowing override from environment variable.
 # Default is project root / "vfs"
 DEFAULT_VFS_PATH = Path(__file__).parent.parent.parent / "vfs"
@@ -60,7 +68,7 @@ def handle_todo_updates(
     """Process update_todo_list tool calls: parse, write JSON, return messages."""
     messages: list[ToolMessage] = []
     for tc in todo_update_calls:
-        todo_data = TodoList(**tc["args"])
+        todo_data = TodoList(tasks=tc["args"]["tasks"])
         actual_path = run_root / "todo_list.json"
         write_todo_list(todo_data, actual_path)
         todo_path = str(actual_path)
@@ -73,20 +81,20 @@ def handle_todo_updates(
     return todo_path, messages
 
 
-def handle_subtopic_additions(
-    add_subtopic_calls: list[dict[str, Any]],
+def handle_batch_task_updates(
+    update_batch_calls: list[dict[str, Any]],
     todo_path: str | None,
 ) -> list[ToolMessage]:
-    """Append new sub-topics to the existing TodoList on disk."""
+    """Append new tasks to the existing TodoList on disk."""
     messages: list[ToolMessage] = []
-    if not add_subtopic_calls:
+    if not update_batch_calls:
         return messages
 
     if not todo_path or not Path(todo_path).exists():
-        for bc in add_subtopic_calls:
+        for bc in update_batch_calls:
             messages.append(
                 ToolMessage(
-                    content="ERROR: Cannot add sub-topics because no TodoList exists yet. Please create one using update_todo_list first.",
+                    content="ERROR: Cannot add new tasks because no TodoList exists yet. Please create one using TodoList first.",
                     tool_call_id=bc["id"],
                 )
             )
@@ -102,32 +110,31 @@ def handle_subtopic_additions(
     # Generate sequential IDs starting from the max existing ID
     max_id = max([t.id for t in todo.tasks + todo.completed_tasks], default=0)
 
-    for bc in add_subtopic_calls:
+    for bc in update_batch_calls:
         batch_outcomes: list[str] = []
-        for topic_args in bc["args"]["topics"]:
-            new_topic = topic_args["new_sub_topic"]
-            new_topic_normalized = new_topic.strip().lower()
+        for task_args in bc["args"]["new_tasks"]:
+            new_task_str = task_args["new_task"]
+            new_task_normalized = new_task_str.strip().lower()
 
             # Deduplication check
-            if new_topic_normalized in existing_tasks_normalized:
+            if new_task_normalized in existing_tasks_normalized:
                 batch_outcomes.append(
-                    f"Skipped adding sub-topic: '{new_topic}' — Reason: Already exists in the todo list."
+                    f"Skipped adding task: '{new_task_str}' — Reason: Already exists in the todo list."
                 )
                 continue
 
             max_id += 1
-            new_task = TaskItem(id=max_id, task=new_topic)
-            todo.tasks.append(new_task)
+            new_task_obj = TaskItem(id=max_id, task=new_task_str)
+            todo.tasks.append(new_task_obj)
             # Add to set to prevent deduplication within the same tool call or across calls
-            existing_tasks_normalized.add(new_topic_normalized)
+            existing_tasks_normalized.add(new_task_normalized)
             batch_outcomes.append(
-                f"Added sub-topic: '{new_topic}' — Reason: {topic_args['rationale']} (ID {max_id})"
+                f"Added task: '{new_task_str}' — Reason: {task_args['rationale']} (ID {max_id})"
             )
 
         messages.append(
             ToolMessage(
-                content="\n".join(batch_outcomes)
-                or "No sub-topics added in this batch.",
+                content="\n".join(batch_outcomes) or "No tasks added in this batch.",
                 tool_call_id=bc["id"],
             )
         )

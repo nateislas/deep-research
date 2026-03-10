@@ -31,11 +31,11 @@ from deep_research.prompts import (
     SUPERVISOR_PROMPT,
 )
 from deep_research.state import (
-    AddSubTopicBatch,
     ConductResearchBatch,
     GlobalState,
     IntakeAction,
     SupervisorState,
+    UpdateTodoListBatch,
     WorkerState,
 )
 from deep_research.tools import (
@@ -44,10 +44,11 @@ from deep_research.tools import (
 )
 from deep_research.utils import (
     RESEARCH_ROOT,
+    CreateTodoList,
     TodoList,
     brief_to_prompt_vars,
     get_findings_summary,
-    handle_subtopic_additions,
+    handle_batch_task_updates,
     handle_todo_updates,
     mark_tasks_completed,
     todo_to_string,
@@ -218,9 +219,9 @@ async def supervisor(
     # First iteration and need to create the list and spawn workers
     # The LLM sees update_todo_list as a tool schema, but we handle execution ourselves.
     if not todo_list_exists:
-        tools = [TodoList, ConductResearchBatch, AddSubTopicBatch]
+        tools = [CreateTodoList, ConductResearchBatch]
     else:
-        tools = [ConductResearchBatch, AddSubTopicBatch]
+        tools = [ConductResearchBatch, UpdateTodoListBatch]
 
     # invoke the LLM
     # Model and reasoning from environment
@@ -298,8 +299,10 @@ async def supervisor_tools(
     batch_research_calls = [
         tc for tc in tool_calls if tc["name"] == "ConductResearchBatch"
     ]
-    add_subtopic_calls = [tc for tc in tool_calls if tc["name"] == "AddSubTopicBatch"]
-    todo_update_calls = [tc for tc in tool_calls if tc["name"] == "TodoList"]
+    update_batch_calls = [
+        tc for tc in tool_calls if tc["name"] == "UpdateTodoListBatch"
+    ]
+    todo_update_calls = [tc for tc in tool_calls if tc["name"] == "CreateTodoList"]
 
     # Extract the thread-specific run root
     thread_id = config["configurable"].get("thread_id", "default")
@@ -312,8 +315,8 @@ async def supervisor_tools(
     # 1. Handle TodoList updates
     todo_path, todo_msgs = handle_todo_updates(todo_update_calls, run_root, todo_path)
 
-    # 2. Handle AddSubTopic calls
-    subtopic_msgs = handle_subtopic_additions(add_subtopic_calls, todo_path)
+    # 2. Handle UpdateTodoListBatch calls
+    subtopic_msgs = handle_batch_task_updates(update_batch_calls, todo_path)
 
     # 3. Flatten and Dispatch Workers from ConductResearchBatch
     # We collect ALL tasks from all batch calls, then cap them.
