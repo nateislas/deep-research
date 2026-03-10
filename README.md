@@ -10,6 +10,8 @@ This project implements a multi-step research workflow managed by a supervisor-w
 2. **Research Loop**: A Supervisor intelligently breaks down the brief into a Todo list and spawns parallel Worker sub-agents. Workers use tools (like Exa Search) to gather information, automatically writing massive results to a Virtual File System (VFS) and synthesizing key findings into compressed summaries.
 3. **Final Report Generation**: Aggregates all worker summaries and the original brief to generate a cohesive, deeply grounded report with in-text citations.
 
+![Deep Research Architecture](docs/fig1.png)
+
 ## Getting Started
 
 ### Prerequisites
@@ -19,11 +21,11 @@ This project implements a multi-step research workflow managed by a supervisor-w
 
 ### Setup
 
-1. **Clone the repository** (if not already in the project root) and navigate into the directory.
+1. **Clone the repository** and navigate into the directory.
 
 2. **Initialize Environment**:
-
    Use `uv` to install dependencies and sync the environment:
+
    ```bash
    uv sync
    ```
@@ -50,6 +52,15 @@ This project implements a multi-step research workflow managed by a supervisor-w
    ```bash
    uvx --refresh --from "langgraph-cli[inmem]" --with-editable . --python 3.11 langgraph dev --allow-blocking
    ```
+
+   Wait for the server to initialize. This will provide you with a local API URL and—most importantly—a link to the **LangGraph Studio UI**.
+
+   ```text
+   - 🚀 API: http://127.0.0.1:2024
+   - 🎨 Studio UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+   ```
+
+   *Note: You must have `LANGSMITH_API_KEY` configured in your `.env` to use the Studio UI for local debugging.*
 
 ## Project Structure
 
