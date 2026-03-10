@@ -1,12 +1,14 @@
 """Utility functions for the deep research agent."""
 
+import asyncio
 import os
 from pathlib import Path
 from typing import Any
 
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, Field
 
+from deep_research.prompts import RESEARCHER_PROMPT
 from deep_research.state import ResearchBrief
 
 
@@ -166,6 +168,126 @@ def mark_tasks_completed(
 
     todo.tasks = tasks_to_keep
     Path(todo_path).write_text(todo.model_dump_json(indent=2))
+
+
+async def dispatch_workers_concurrently(
+    batch_research_calls: list[dict],
+    run_root: Path,
+    todo_path: str | None,
+    brief: ResearchBrief,
+    config: dict,
+    worker_subgraph: callable,
+    max_concurrent_workers: int,
+) -> tuple[list[int], list[ToolMessage], list[str]]:
+    """Dispatch and Aggregate parallel workers.
+
+    Returns:
+        completed_task_ids: IDs of successfully executed tasks to be crossed off the Todo list.
+        batch_msgs: Parsed ToolMessages detailing success/failure rates.
+        new_findings_paths: VFS paths written to by workers.
+    """
+    all_task_items = []
+    for bc in batch_research_calls:
+        for t_args in bc["args"]["tasks"]:
+            all_task_items.append({"args": t_args, "batch_id": bc["id"]})
+
+    capped_tasks = all_task_items[:max_concurrent_workers]
+
+    worker_inputs = []
+    if todo_path and Path(todo_path).exists():
+        todo = TodoList.model_validate_json(Path(todo_path).read_text())
+    else:
+        todo = None
+
+    for item in capped_tasks:
+        args = item["args"]
+        vfs_dir = run_root / args["output_dirname"]
+        vfs_dir.mkdir(parents=True, exist_ok=True)
+
+        task_id = args["task_id"]
+        sub_topic = f"Task ID {task_id}"
+        if todo:
+            for t in todo.tasks:
+                if t.id == task_id:
+                    sub_topic = t.task
+                    break
+
+        worker_inputs.append(
+            {
+                "task_id": task_id,
+                "sub_topic": sub_topic,
+                "args": args,
+                "batch_id": item["batch_id"],
+            }
+        )
+
+    research_coroutines = [
+        worker_subgraph.ainvoke(
+            {
+                "brief": brief,
+                "run_root": str(run_root),
+                "output_dirname": item["args"]["output_dirname"],
+                "researcher_messages": [
+                    SystemMessage(content=RESEARCHER_PROMPT),
+                    HumanMessage(
+                        content=(
+                            f"## OVERARCHING PROJECT CONTEXT\n"
+                            f"**Project Topic:** {brief.topic}\n"
+                            f"**Main Objective:** {brief.main_objective}\n\n"
+                            f"--- \n\n"
+                            f"## YOUR SPECIFIC TASK\n"
+                            f"**Sub-topic to research:** {item['sub_topic']}\n"
+                            f"**Additional context:** {item['args'].get('context') or 'None'}\n\n"
+                            f"1. Run 2-3 targeted searches.\n"
+                            f"2. Write your distilled findings to 'compressed_summary.md' using the write_file tool.\n"
+                            f"Do NOT finish until you have written your summary file."
+                        )
+                    ),
+                ],
+            },  # type: ignore
+            config=config,
+        )
+        for item in worker_inputs
+    ]
+
+    results = await asyncio.gather(*research_coroutines, return_exceptions=True)
+
+    batch_outcomes: dict[str, list[str]] = {bc["id"]: [] for bc in batch_research_calls}
+    completed_task_ids: list[int] = []
+    new_findings_paths: list[str] = []
+
+    for item, result in zip(worker_inputs, results):
+        task_id = item["task_id"]
+        sub_topic = item["sub_topic"]
+        batch_id = item["batch_id"]
+
+        if isinstance(result, Exception):
+            batch_outcomes[batch_id].append(f"Task {task_id} FAILED: {result!s}")
+            continue
+
+        worker_output_dir = run_root / item["args"]["output_dirname"]
+        summary_file = worker_output_dir / "compressed_summary.md"
+        if not summary_file.exists():
+            batch_outcomes[batch_id].append(
+                f"Task {task_id} FAILED: Missing compressed_summary.md from worker."
+            )
+            continue
+
+        batch_outcomes[batch_id].append(
+            f"Task {task_id} COMPLETED: {sub_topic[:40]}..."
+        )
+        completed_task_ids.append(task_id)
+        new_findings_paths.append(str(worker_output_dir))
+
+    batch_msgs = [
+        ToolMessage(
+            content="\n".join(outcomes) or "No tasks processed in this batch.",
+            tool_call_id=bid,
+        )
+        for bid, outcomes in batch_outcomes.items()
+    ]
+
+    return completed_task_ids, batch_msgs, new_findings_paths
 
 
 # --- Prompt Formatting Helpers ---
