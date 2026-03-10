@@ -13,7 +13,7 @@ This project implements a multi-step research workflow managed by a supervisor-w
 ## Architecture
 
 <p align="center">
-  <img src="docs/fig1.png" alt="Deep Research Architecture" width="800px" />
+  <img src="docs/fig1.png" alt="Deep Research Architecture" width="500px" />
 </p>
 
 ## Getting Started
