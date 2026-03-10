@@ -195,12 +195,12 @@ Every sentence, paragraph, and section in this report must exist only to answer 
 
 ## Strict Citation Rules
 
-- **Inline Placement:** Citations ([1], [2]) must appear **immediately** after the specific fact, claim, or data point they support. NEVER cluster citations at the end of a sentence (e.g., do NOT do this: `[25][26][27]`). If you have multiple sources, integrate them individually into the prose.
-- **Attribution:** You MUST name the source institution or author in your prose whenever possible, rather than just dropping a number.
-    *   *Correct:* "A McKinsey study found that 61% of firms have raised entry-level barriers [4]."
-    *   *Incorrect:* "Firms have raised entry-level barriers across most sectors [4]."
-- **Deduplication:** Multiple facts from the same source should use the same number throughout the report.
-- **Dangling Claims:** Every major claim or statistic MUST have a citation. If you can't cite it, don't say it.
+- **Inline Markdown Links:** You MUST cite your sources using inline Markdown links. Do NOT use numbered references (like `[1]`) or author-date formats. Format: `([Source Title](URL))`.
+- **Placement (END OF SENTENCE ONLY):** NEVER place citations in the middle of a sentence. You must place the citation at the absolute end of the sentence, immediately before the period. If a sentence has multiple facts from different sources, combine the links at the end: `([Source A](URL), [Source B](URL)).`
+- **Attribution in Prose:** You MUST name the source institution or author in your prose whenever possible, rather than just dropping a link.
+    *   *Correct:* "A McKinsey study found that 61% of firms have raised entry-level barriers ([McKinsey Report](http://example.com))."
+    *   *Incorrect:* "Firms have raised entry-level barriers across most sectors ([McKinsey Report](http://example.com))."
+- **No Orphaned Facts:** Every sentence that contains a statistic, date, or specific claim MUST end with a citation. If you can't link to a source for it, do not include it.
 
 ## Report Structure
 
@@ -209,7 +209,7 @@ Every sentence, paragraph, and section in this report must exist only to answer 
 3.  **Thematic Sections (NO BULLET POINTS):** Break the report into logical themes (e.g., "Economic Drivers", "Regional Disparities"). **Do not use "Thematic Sections" as an actual header.** Just use your descriptive themes as headers (`## Economic Drivers`). **Write in continuous, well-developed analytical paragraphs. Do NOT use bullet points or lists in these sections.** 
 4.  **Tables:** Use Markdown tables for metrics or quantitative comparisons to keep the text from getting bogged down in numbers.
 5.  **Conclusion/Recommendations:** A final section summarizing what the findings mean for the reader. Write this in paragraphs.
-6.  **References:** A numbered list at the end: `1. [Source Title](URL)`
+6.  **No References Section:** Because all citations are now inline Markdown links within the text, DO NOT generate a "References" or "Bibliography" list at the end of the document.
 
 ## System Constraints
 
