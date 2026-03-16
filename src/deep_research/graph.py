@@ -47,9 +47,9 @@ from deep_research.utils import (
     brief_to_prompt_vars,
     dispatch_workers_concurrently,
     execute_tools_concurrently,
+    extend_research_tasks,
     get_findings_summary,
-    handle_batch_task_updates,
-    handle_todo_updates,
+    initialize_research_plan,
     mark_tasks_completed,
     todo_to_string,
 )
@@ -298,10 +298,10 @@ async def supervisor_tools(
     batch_research_calls = [
         tc for tc in tool_calls if tc["name"] == "ConductResearchBatch"
     ]
-    update_batch_calls = [
+    task_extension_calls = [
         tc for tc in tool_calls if tc["name"] == "UpdateTodoListBatch"
     ]
-    todo_update_calls = [tc for tc in tool_calls if tc["name"] == "CreateTodoList"]
+    plan_init_calls = [tc for tc in tool_calls if tc["name"] == "CreateTodoList"]
 
     # Extract the thread-specific run root
     thread_id = config["configurable"].get("thread_id", "default")
@@ -311,11 +311,13 @@ async def supervisor_tools(
     new_findings_paths = []
     todo_path = state.get("todo_list_path")
 
-    # 1. Handle TodoList updates
-    todo_path, todo_msgs = handle_todo_updates(todo_update_calls, run_root, todo_path)
+    # 1. Handle TodoList updates (Stage: Initialize)
+    todo_path, todo_msgs = initialize_research_plan(
+        plan_init_calls, run_root, todo_path
+    )
 
-    # 2. Handle UpdateTodoListBatch calls
-    subtopic_msgs = handle_batch_task_updates(update_batch_calls, todo_path)
+    # 2. Handle UpdateTodoListBatch calls (Stage: Extend)
+    subtopic_msgs = extend_research_tasks(task_extension_calls, todo_path)
 
     # 3. Flatten and Dispatch Workers from ConductResearchBatch
     (
