@@ -20,7 +20,7 @@ RESEARCH_ROOT = Path(os.getenv("RESEARCH_VFS_PATH", str(DEFAULT_VFS_PATH)))
 # --- Todo List Helpers ---
 
 
-def write_todo_list(todo: TodoList, path: Path) -> None:
+def persist_todo_to_vfs(todo: TodoList, path: Path) -> None:
     """Write a TodoList to disk as JSON.
 
     This is a plain helper called programmatically by supervisor_tools.
@@ -37,41 +37,41 @@ def write_todo_list(todo: TodoList, path: Path) -> None:
 # --- Supervisor Tools Helpers ---
 
 
-def handle_todo_updates(
-    todo_update_calls: list[dict[str, Any]],
+def initialize_research_plan(
+    plan_init_calls: list[dict[str, Any]],
     run_root: Path,
     todo_path: str | None,
 ) -> tuple[str | None, list[ToolMessage]]:
-    """Process update_todo_list tool calls: parse, write JSON, return messages."""
+    """Process CreateTodoList tool calls: parse, write JSON, return messages."""
     messages: list[ToolMessage] = []
-    for tc in todo_update_calls:
+    for tc in plan_init_calls:
         todo_data = TodoList(tasks=tc["args"]["tasks"])
         actual_path = run_root / "todo_list.json"
-        write_todo_list(todo_data, actual_path)
+        persist_todo_to_vfs(todo_data, actual_path)
         todo_path = str(actual_path)
         messages.append(
             ToolMessage(
-                content=f"Todo list updated at {actual_path}.",
+                content=f"Research plan initialized at {actual_path}.",
                 tool_call_id=tc["id"],
             )
         )
     return todo_path, messages
 
 
-def handle_batch_task_updates(
-    update_batch_calls: list[dict[str, Any]],
+def extend_research_tasks(
+    task_extension_calls: list[dict[str, Any]],
     todo_path: str | None,
 ) -> list[ToolMessage]:
-    """Append new tasks to the existing TodoList on disk."""
+    """Append new discovery leads to the existing TodoList on disk."""
     messages: list[ToolMessage] = []
-    if not update_batch_calls:
+    if not task_extension_calls:
         return messages
 
     if not todo_path or not Path(todo_path).exists():
-        for bc in update_batch_calls:
+        for bc in task_extension_calls:
             messages.append(
                 ToolMessage(
-                    content="ERROR: Cannot add new tasks because no TodoList exists yet. Please create one using TodoList first.",
+                    content="ERROR: Cannot add new tasks because no TodoList exists yet. Please create one using CreateTodoList first.",
                     tool_call_id=bc["id"],
                 )
             )
@@ -87,7 +87,7 @@ def handle_batch_task_updates(
     # Generate sequential IDs starting from the max existing ID
     max_id = max([t.id for t in todo.tasks + todo.completed_tasks], default=0)
 
-    for bc in update_batch_calls:
+    for bc in task_extension_calls:
         batch_outcomes: list[str] = []
         for task_args in bc["args"]["new_tasks"]:
             new_task_str = task_args["new_task"]
@@ -265,6 +265,44 @@ async def dispatch_workers_concurrently(
     return completed_task_ids, batch_msgs, new_findings_paths
 
 
+async def _execute_single_tool(
+    tc: dict, tools_map: dict[str, BaseTool], max_attempts: int
+) -> ToolMessage:
+    """Execute a single tool call with retries.
+
+    Args:
+        tc: The tool call dictionary.
+        tools_map: Mapping of tool names to objects.
+        max_attempts: Max number of retries.
+
+    Returns:
+        A ToolMessage with the result.
+    """
+    tool = tools_map.get(tc["name"])
+    if not tool:
+        return ToolMessage(content=f"Tool {tc['name']} not found.", tool_call_id=tc["id"])
+
+    args = dict(tc["args"])
+    last_error = None
+    result = None
+
+    for attempt in range(max_attempts):
+        try:
+            result = await tool.ainvoke(args)
+            last_error = None
+            break
+        except Exception as e:
+            last_error = e
+            if attempt < max_attempts - 1:
+                # Exponential backoff: 3s, then 6s
+                await asyncio.sleep(3 * (attempt + 1))
+
+    if last_error is not None:
+        result = f"Tool error after {max_attempts} attempts: {last_error!s}"
+
+    return ToolMessage(content=str(result), tool_call_id=tc["id"])
+
+
 async def execute_tools_concurrently(
     tool_calls: list[dict],
     tools_map: dict[str, BaseTool],
@@ -280,35 +318,10 @@ async def execute_tools_concurrently(
     Returns:
         List of formatted ToolMessages containing the results or errors.
     """
-
-    async def execute_single_tool(tc: dict) -> ToolMessage:
-        tool = tools_map.get(tc["name"])
-        if not tool:
-            return ToolMessage(
-                content=f"Tool {tc['name']} not found.", tool_call_id=tc["id"]
-            )
-
-        args = dict(tc["args"])
-        last_error = None
-        result = None
-
-        for attempt in range(max_attempts):
-            try:
-                result = await tool.ainvoke(args)
-                last_error = None
-                break
-            except Exception as e:
-                last_error = e
-                if attempt < max_attempts - 1:
-                    await asyncio.sleep(3 * (attempt + 1))  # 3s, then 6s
-
-        if last_error is not None:
-            result = f"Tool error after {max_attempts} attempts: {last_error!s}"
-
-        return ToolMessage(content=str(result), tool_call_id=tc["id"])
-
-    # Launch all tool executions concurrently
-    coroutines = [execute_single_tool(tc) for tc in tool_calls]
+    # Launch all tool executions concurrently using the module-level helper
+    coroutines = [
+        _execute_single_tool(tc, tools_map, max_attempts) for tc in tool_calls
+    ]
     results = await asyncio.gather(*coroutines)
     return list(results)
 
